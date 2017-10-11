@@ -3,6 +3,7 @@ import os
 import tarfile
 
 from utils.data import download, is_done, mark_done
+from .conllu_parser import read_conllu_file, get_pos_tags
 
 
 def build(datapath='downloads'):
@@ -47,7 +48,11 @@ class DataProvider(object):
         root = os.path.join(datapath, lang)
 
         self.train_path = glob.glob(os.path.join(root, '*train.conllu'))[0]
+        self.train = read_conllu_file(self.train_path)
+        self.train_pos_tags = get_pos_tags(self.train)
         self.dev_path = glob.glob(os.path.join(root, '*dev.conllu'))[0]
+        self.dev = read_conllu_file(self.dev_path)
+        self.dev_pos_tags = get_pos_tags(self.dev)
 
 
 if __name__ == '__main__':
