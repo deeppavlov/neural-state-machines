@@ -32,10 +32,7 @@ def read_conllu_file(filename):
 
 def get_pos_tags(sentences):
     for s in sentences:
-        new_sent = []
-        for w in s:
-            p = (w.form, w.cpostag)
-            new_sent.append(p)
+        new_sent = [(w.form, w.cpostag) for w in s]
         yield new_sent
 
 
