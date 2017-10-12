@@ -54,6 +54,8 @@ class DataProvider(object):
         self.dev = list(read_conllu_file(self.dev_path))
         self.dev_pos_tags = list(get_pos_tags(self.dev))
 
+        self.pos_tags = sorted({tag for sent in self.train_pos_tags for word, tag in sent})
+
 
 if __name__ == '__main__':
     build()
