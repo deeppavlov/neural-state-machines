@@ -59,13 +59,14 @@ class POS(nn.Module):
     def __init__(self, word_emb_size, tags_count):
         super().__init__()
         self.W = nn.Linear(word_emb_size, tags_count)
+        self.tag_emb = nn.Embedding(tags_count, tags_count)
 
     def create_initial_states(self, inputs):
         res = []
         for input in inputs:
             words = ('',) + input + ('',)
             tensor_input = torch.stack([word_char_emb(w) for w in words])
-            res.append(POSState(tensor_input, 1, ()))
+            res.append(POSState(tensor_input, 1, (tagmap[TAG_START], )))
         return res
 
     def act(self, states, actions: List[int]):
@@ -75,12 +76,20 @@ class POS(nn.Module):
         for state in states:
             assert state.index < len(state.input) - 1
 
+        prev_tag_ids = Variable(torch.LongTensor([s.outputs[s.index-1] for s in states]))
+
         X = Variable(torch.stack([s.input[s.index] for s in states]))
-        return self.W.forward(X).exp()
+        res = self.W.forward(X) + self.tag_emb.forward(prev_tag_ids)
+        return res.exp()
 
 
-pos = POS(WORD_DIM, tags_count)
-states = pos.create_initial_states([('hi', 'there'), ('wazzup',)])
+pos_model = POS(WORD_DIM, tags_count)
+
+X = [('hi', 'there'), ('wazzup',)]
+
+states = pos_model.create_initial_states(X)
 assert states[0].input.size() == torch.Size([4, WORD_DIM])
-assert pos.forward(states).size() == torch.Size([2, 18])
+assert pos_model.forward(states).size() == torch.Size([2, 18])
 
+batches = [zip(*sent) for sent in pos.train_pos_tags]
+pass
