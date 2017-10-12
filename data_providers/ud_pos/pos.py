@@ -48,11 +48,11 @@ class DataProvider(object):
         root = os.path.join(datapath, lang)
 
         self.train_path = glob.glob(os.path.join(root, '*train.conllu'))[0]
-        self.train = read_conllu_file(self.train_path)
-        self.train_pos_tags = get_pos_tags(self.train)
+        self.train = list(read_conllu_file(self.train_path))
+        self.train_pos_tags = list(get_pos_tags(self.train))
         self.dev_path = glob.glob(os.path.join(root, '*dev.conllu'))[0]
-        self.dev = read_conllu_file(self.dev_path)
-        self.dev_pos_tags = get_pos_tags(self.dev)
+        self.dev = list(read_conllu_file(self.dev_path))
+        self.dev_pos_tags = list(get_pos_tags(self.dev))
 
 
 if __name__ == '__main__':
