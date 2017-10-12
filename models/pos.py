@@ -34,7 +34,7 @@ EPOCHS = 100
 WORD_DIM = 1000
 HIDDEN_SIZE = 30
 T = 2
-LR = 0.005
+LR = 0.05
 BATCH_SIZE = 29
 
 
@@ -97,6 +97,8 @@ assert states[0].input.size() == torch.Size([4, WORD_DIM])
 assert pos_model.forward(states).size() == torch.Size([2, 18])
 
 train_sents = [tuple(zip(*sent)) for sent in pos.train_pos_tags]
+test_sents = [tuple(zip(*sent)) for sent in pos.dev_pos_tags]
+
 
 def batch_generator(seq: List, batch_size):
     while True:
@@ -104,10 +106,10 @@ def batch_generator(seq: List, batch_size):
         for i in range(0, len(indexi), batch_size):
             yield [seq[k] for k in indexi[i:i+batch_size]]
 
-seen_samples = 0
 optimizer = Adam(pos_model.parameters(), LR)
 criterion = nn.CrossEntropyLoss()
 
+seen_samples = 0
 losses = []
 for batch in batch_generator(train_sents, BATCH_SIZE):
     loss = Variable(torch.zeros(1))
@@ -138,5 +140,30 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
 
     seen_samples += len(batch)
     print('{:.2f}'.format(seen_samples).ljust(8), np.mean(losses[-10:]))
+    if (seen_samples // BATCH_SIZE) % (500 // BATCH_SIZE) == 0:
+        inputs, test_tags = zip(*test_sents)
+        test_tags = [list(tags) for tags in test_tags]
+        states = pos_model.create_initial_states(inputs)
+
+        state_max_len = max([len(s.input) - 2 for s in states])
+        words_seen = 0
+        correct_words = 0
+        loss = 0
+        for i in range(state_max_len):
+            decisions = F.softmax(pos_model.forward(states))
+            ys = [tagmap[tag.pop(0)] for tag in test_tags]
+            loss += criterion(decisions, Variable(torch.LongTensor(ys))).data[0] * len(states)
+            words_seen += len(states)
+            _, argmax = decisions.max(1)
+            correct_words += (argmax == Variable(torch.LongTensor(ys))).sum().data[0]
+
+            new_states = pos_model.act(states, ys)
+
+            states = [s for s in new_states if s.index < len(s.input) - 1]
+            test_tags = [tag for tag in test_tags if tag]
+
+        loss = loss / words_seen
+
+        print('Test',  '{:.2f}'.format(loss).ljust(8), '{:.2f}'.format(correct_words/words_seen*100), sep='\t')
 
 
