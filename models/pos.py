@@ -4,8 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+from torch.optim import Adam
+import numpy as np
 
 from data_providers.ud_pos.pos import DataProvider
+
+
 
 TAG_START = 'START'
 TAG_END = 'END'
@@ -30,7 +34,8 @@ EPOCHS = 100
 WORD_DIM = 1000
 HIDDEN_SIZE = 30
 T = 2
-LR = 0.5
+LR = 0.005
+BATCH_SIZE = 29
 
 
 pos = DataProvider(lang='russian')
@@ -91,5 +96,47 @@ states = pos_model.create_initial_states(X)
 assert states[0].input.size() == torch.Size([4, WORD_DIM])
 assert pos_model.forward(states).size() == torch.Size([2, 18])
 
-batches = [zip(*sent) for sent in pos.train_pos_tags]
-pass
+train_sents = [tuple(zip(*sent)) for sent in pos.train_pos_tags]
+
+def batch_generator(seq: List, batch_size):
+    while True:
+        indexi = torch.randperm(len(seq))
+        for i in range(0, len(indexi), batch_size):
+            yield [seq[k] for k in indexi[i:i+batch_size]]
+
+seen_samples = 0
+optimizer = Adam(pos_model.parameters(), LR)
+criterion = nn.CrossEntropyLoss()
+
+losses = []
+for batch in batch_generator(train_sents, BATCH_SIZE):
+    loss = Variable(torch.zeros(1))
+
+    inputs, batch_tags = zip(*batch)
+    batch_tags = [list(tags) for tags in batch_tags]
+    states = pos_model.create_initial_states(inputs)
+
+    state_max_len = max([len(s.input)-2 for s in states])
+    words_seen = 0
+    for i in range(state_max_len):
+        decisions = F.softmax(pos_model.forward(states))
+        ys = [tagmap[tag.pop(0)] for tag in batch_tags]
+        loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
+        words_seen += len(states)
+
+        new_states = pos_model.act(states, ys)
+
+        states = [s for s in new_states if s.index < len(s.input) - 1]
+        batch_tags = [tag for tag in batch_tags if tag]
+
+    optimizer.zero_grad()
+    loss = loss / words_seen
+    loss.backward()
+    losses.append(loss.data[0])
+
+    optimizer.step()
+
+    seen_samples += len(batch)
+    print('{:.2f}'.format(seen_samples).ljust(8), np.mean(losses[-10:]))
+
+
