@@ -1,4 +1,5 @@
 from collections import namedtuple
+from itertools import chain
 from typing import List
 import torch
 import torch.nn as nn
@@ -7,9 +8,8 @@ from torch.autograd import Variable
 from torch.optim import Adam
 import numpy as np
 
-from data_providers.gikrya.gikrya import DataProvider
-
-
+import data_providers.ud_pos.pos as ud
+import data_providers.gikrya.gikrya as gikrya
 
 TAG_START = 'START'
 TAG_END = 'END'
@@ -28,17 +28,19 @@ class NeuSM:
 
 ################################ POS-tagger ###############################
 
-POSState = namedtuple('POSState', 'input index outputs')
+POSState = namedtuple('POSState', 'chars words index outputs')
 
-EPOCHS = 100
-WORD_DIM = 1000
-HIDDEN_SIZE = 30
-T = 2
-LR = 0.1
+STOP_AFTER_SAMPLES = 10 * 1000
+TEST_EVERY_SAMPLES = 2000
+CHAR_EMB_COUNT = 500
+WORD_EMB_COUNT = 30 * 1000
+HIDDEN_SIZE = 40
+LR = 0.01
 BATCH_SIZE = 29
 
 
-pos = DataProvider(lang='russian')
+pos = ud.DataProvider(lang='russian')
+# pos = gikrya.DataProvider(lang='russian')
 train_pos_tags = pos.train_pos_tags
 dev_pos_tags = pos.dev_pos_tags
 
@@ -52,7 +54,7 @@ def word_char_emb(str_word):
     assert isinstance(str_word, str)
     w = ' ' + str_word + ' '
     wl = len(w)
-    ec = WORD_DIM
+    ec = CHAR_EMB_COUNT
     emb = torch.zeros(ec)
     n = 3
     for i in range(wl - n + 1):
@@ -60,35 +62,55 @@ def word_char_emb(str_word):
     return emb
 
 
+def char_emb_ids(word: str, embeddings_count, embedding_length=3):
+    w = ' ' + word + ' '
+    n = len(w)
+    return [hash(w[i:i + n + 1]) % embeddings_count for i in range(n - embedding_length + 1)]
+
+
 class POS(nn.Module):
-    def __init__(self, word_emb_size, tags_count):
+    def __init__(self, hidden_size, tags_count):
         super().__init__()
-        self.W = nn.Linear(word_emb_size, tags_count)
-        self.tag_emb = nn.Embedding(tags_count, tags_count)
+        self.tag_emb = nn.Embedding(tags_count, hidden_size)
+        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, hidden_size)
+        self.word_emb = nn.Embedding(WORD_EMB_COUNT, hidden_size)
+
+        self.W = nn.Linear(self.tag_emb.embedding_dim + self.char_emb.embedding_dim + self.word_emb.embedding_dim,
+                           tags_count)
 
     def create_initial_states(self, inputs):
         res = []
         for input in inputs:
-            words = ('',) + input + ('',)
-            tensor_input = torch.stack([word_char_emb(w) for w in words])
-            res.append(POSState(tensor_input, 1, (tagmap[TAG_START], )))
+            words = (' ',) + input + (' ',)
+            char_input = [char_emb_ids(w, CHAR_EMB_COUNT) for w in words]
+            res.append(POSState(char_input, words, 1, (tagmap[TAG_START], )))
         return res
 
     def act(self, states, actions: List[int]):
-        return [POSState(s.input, s.index+1, s.outputs + (a, )) for s, a in zip(states, actions)]
+        return [POSState(s.chars, s.words, s.index+1, s.outputs + (a, )) for s, a in zip(states, actions)]
 
     def forward(self, states):
-        for state in states:
-            assert state.index < len(state.input) - 1
+        char_offsets = []
+        words = []
+        for s in states:
+            assert s.index < len(s.chars) - 1
+            words.append(s.words[s.index-1:s.index+2])
+            if not char_offsets:
+                char_offsets.append(0)
+            else:
+                char_offsets.append(len(s.chars[s.index]))
 
         prev_tag_ids = Variable(torch.LongTensor([s.outputs[s.index-1] for s in states]))
 
-        X = Variable(torch.stack([s.input[s.index] for s in states]))
-        res = self.W.forward(X) + self.tag_emb.forward(prev_tag_ids)
+        char_ids = list(chain(*[s.chars[s.index] for s in states]))
+        X = self.char_emb.forward(Variable(torch.LongTensor(char_ids)), offsets=Variable(torch.cumsum(torch.LongTensor(char_offsets), 0)))
+        WX = self.word_emb.forward(Variable(torch.LongTensor([[hash(w) % WORD_EMB_COUNT for w in ws] for ws in words])))
+        # res = torch.cat([X, self.tag_emb.forward(prev_tag_ids), WX.sum(1)], 1)
+        res = self.W.forward(WX.view(WX.size(0), -1))
         return res.exp()
 
 
-pos_model = POS(WORD_DIM, tags_count)
+pos_model = POS(HIDDEN_SIZE, tags_count)
 
 train_sents = [tuple(zip(*sent)) for sent in pos.train_pos_tags]
 test_sents = [tuple(zip(*sent)) for sent in pos.dev_pos_tags]
@@ -112,17 +134,18 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
     batch_tags = [list(tags) for tags in batch_tags]
     states = pos_model.create_initial_states(inputs)
 
-    state_max_len = max([len(s.input)-2 for s in states])
+    state_max_len = max([len(s.chars)-2 for s in states])
     words_seen = 0
     for i in range(state_max_len):
-        decisions = F.softmax(pos_model.forward(states))
+        decisions = pos_model.forward(states)
+        decisions /= decisions.sum(1, keepdim=True)
         ys = [tagmap[tag.pop(0)] for tag in batch_tags]
         loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
         words_seen += len(states)
 
         new_states = pos_model.act(states, ys)
 
-        states = [s for s in new_states if s.index < len(s.input) - 1]
+        states = [s for s in new_states if s.index < len(s.chars) - 1]
         batch_tags = [tag for tag in batch_tags if tag]
 
     optimizer.zero_grad()
@@ -134,12 +157,12 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
 
     seen_samples += len(batch)
     print('{:.2f}'.format(seen_samples).ljust(8), np.mean(losses[-10:]))
-    if (seen_samples // BATCH_SIZE) % (500 // BATCH_SIZE) == 0:
+    if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
         inputs, test_tags = zip(*test_sents)
         test_tags = [list(tags) for tags in test_tags]
         states = pos_model.create_initial_states(inputs)
 
-        state_max_len = max([len(s.input) - 2 for s in states])
+        state_max_len = max([len(s.chars) - 2 for s in states])
         words_seen = 0
         correct_words = 0
         loss = 0
@@ -153,11 +176,12 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
 
             new_states = pos_model.act(states, ys)
 
-            states = [s for s in new_states if s.index < len(s.input) - 1]
+            states = [s for s in new_states if s.index < len(s.chars) - 1]
             test_tags = [tag for tag in test_tags if tag]
 
         loss = loss / words_seen
 
         print('Test',  '{:.2f}'.format(loss).ljust(8), '{:.2f}'.format(correct_words/words_seen*100), sep='\t')
 
-
+    # if seen_samples > STOP_AFTER_SAMPLES:
+    #     break
