@@ -7,7 +7,7 @@ from torch.autograd import Variable
 from torch.optim import Adam
 import numpy as np
 
-from data_providers.ud_pos.pos import DataProvider
+from data_providers.gikrya.gikrya import DataProvider
 
 
 
@@ -34,7 +34,7 @@ EPOCHS = 100
 WORD_DIM = 1000
 HIDDEN_SIZE = 30
 T = 2
-LR = 0.05
+LR = 0.1
 BATCH_SIZE = 29
 
 
@@ -89,12 +89,6 @@ class POS(nn.Module):
 
 
 pos_model = POS(WORD_DIM, tags_count)
-
-X = [('hi', 'there'), ('wazzup',)]
-
-states = pos_model.create_initial_states(X)
-assert states[0].input.size() == torch.Size([4, WORD_DIM])
-assert pos_model.forward(states).size() == torch.Size([2, 18])
 
 train_sents = [tuple(zip(*sent)) for sent in pos.train_pos_tags]
 test_sents = [tuple(zip(*sent)) for sent in pos.dev_pos_tags]
