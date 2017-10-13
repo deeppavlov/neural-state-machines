@@ -72,10 +72,10 @@ class POS(nn.Module):
     def __init__(self, hidden_size, tags_count):
         super().__init__()
         self.tag_emb = nn.Embedding(tags_count, hidden_size)
-        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, hidden_size)
+        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, hidden_size, mode='sum')
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, hidden_size)
 
-        self.W = nn.Linear(self.tag_emb.embedding_dim + self.char_emb.embedding_dim + self.word_emb.embedding_dim,
+        self.W = nn.Linear(self.char_emb.embedding_dim + 3*self.word_emb.embedding_dim,
                            tags_count)
 
     def create_initial_states(self, inputs):
@@ -90,23 +90,22 @@ class POS(nn.Module):
         return [POSState(s.chars, s.words, s.index+1, s.outputs + (a, )) for s, a in zip(states, actions)]
 
     def forward(self, states):
-        char_offsets = []
+        char_offsets = [0]
         words = []
         for s in states:
             assert s.index < len(s.chars) - 1
             words.append(s.words[s.index-1:s.index+2])
-            if not char_offsets:
-                char_offsets.append(0)
-            else:
-                char_offsets.append(len(s.chars[s.index]))
+            char_offsets.append(len(s.chars[s.index]))
+        char_offsets.pop()
 
         prev_tag_ids = Variable(torch.LongTensor([s.outputs[s.index-1] for s in states]))
 
         char_ids = list(chain(*[s.chars[s.index] for s in states]))
         X = self.char_emb.forward(Variable(torch.LongTensor(char_ids)), offsets=Variable(torch.cumsum(torch.LongTensor(char_offsets), 0)))
         WX = self.word_emb.forward(Variable(torch.LongTensor([[hash(w) % WORD_EMB_COUNT for w in ws] for ws in words])))
+        WX = WX.view(WX.size(0), -1)
         # res = torch.cat([X, self.tag_emb.forward(prev_tag_ids), WX.sum(1)], 1)
-        res = self.W.forward(WX.view(WX.size(0), -1))
+        res = self.W.forward(torch.cat([X, WX], 1))
         return res.exp()
 
 
