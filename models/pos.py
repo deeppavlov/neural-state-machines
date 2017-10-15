@@ -39,7 +39,8 @@ LR = 0.01
 BATCH_SIZE = 29
 
 
-pos = ud.DataProvider(lang='russian')
+pos = ud.DataProvider(lang='english')
+# pos = ud.DataProvider(lang='russian')
 # pos = gikrya.DataProvider(lang='russian')
 train_pos_tags = pos.train_pos_tags
 dev_pos_tags = pos.dev_pos_tags
@@ -75,7 +76,7 @@ class POS(nn.Module):
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, hidden_size, mode='sum')
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, hidden_size)
 
-        self.W = nn.Linear(self.char_emb.embedding_dim + 3*self.word_emb.embedding_dim,
+        self.W = nn.Linear(3*self.word_emb.embedding_dim,
                            tags_count)
 
     def create_initial_states(self, inputs):
@@ -90,22 +91,27 @@ class POS(nn.Module):
         return [POSState(s.chars, s.words, s.index+1, s.outputs + (a, )) for s, a in zip(states, actions)]
 
     def forward(self, states):
-        char_offsets = [0]
+        char_offsets = []
         words = []
         for s in states:
             assert s.index < len(s.chars) - 1
             words.append(s.words[s.index-1:s.index+2])
-            char_offsets.append(len(s.chars[s.index]))
+            char_offsets.append([len(s.chars[i]) for i in range(s.index-1, s.index+2)])
+        char_offsets = [co[k] for k in range(len(char_offsets[0])) for co in char_offsets]
+        char_offsets.insert(0, 0)
         char_offsets.pop()
 
         prev_tag_ids = Variable(torch.LongTensor([s.outputs[s.index-1] for s in states]))
 
-        char_ids = list(chain(*[s.chars[s.index] for s in states]))
+        char_ids = list(chain(*[s.chars[s.index + i] for s in states for i in range(-1, 2)]))
         X = self.char_emb.forward(Variable(torch.LongTensor(char_ids)), offsets=Variable(torch.cumsum(torch.LongTensor(char_offsets), 0)))
+        X = X.view(len(states), -1)
         WX = self.word_emb.forward(Variable(torch.LongTensor([[hash(w) % WORD_EMB_COUNT for w in ws] for ws in words])))
         WX = WX.view(WX.size(0), -1)
         # res = torch.cat([X, self.tag_emb.forward(prev_tag_ids), WX.sum(1)], 1)
-        res = self.W.forward(torch.cat([X, WX], 1))
+        # X = X + WX
+        res = self.W.forward(X)
+        res -= res.max(1, keepdim=True)[0]
         return res.exp()
 
 
@@ -166,7 +172,8 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
         correct_words = 0
         loss = 0
         for i in range(state_max_len):
-            decisions = F.softmax(pos_model.forward(states))
+            decisions = pos_model.forward(states)
+            decisions /= decisions.sum(1, keepdim=True)
             ys = [tagmap[tag.pop(0)] for tag in test_tags]
             loss += criterion(decisions, Variable(torch.LongTensor(ys))).data[0] * len(states)
             words_seen += len(states)
@@ -177,6 +184,8 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
 
             states = [s for s in new_states if s.index < len(s.chars) - 1]
             test_tags = [tag for tag in test_tags if tag]
+
+        assert not states
 
         loss = loss / words_seen
 
