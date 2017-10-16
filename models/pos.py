@@ -31,17 +31,17 @@ class NeuSM:
 POSState = namedtuple('POSState', 'chars words index outputs')
 
 STOP_AFTER_SAMPLES = 10 * 1000
-TEST_EVERY_SAMPLES = 2000
+TEST_EVERY_SAMPLES = 6000
 CHAR_EMB_COUNT = 500
 WORD_EMB_COUNT = 30 * 1000
 HIDDEN_SIZE = 50
-LR = 0.1
+LR = 0.01
 BATCH_SIZE = 29
 
 
 # pos = ud.DataProvider(lang='english')
-pos = ud.DataProvider(lang='russian')
-# pos = gikrya.DataProvider(lang='russian')
+# pos = ud.DataProvider(lang='russian')
+pos = gikrya.DataProvider(lang='russian')
 train_pos_tags = pos.train_pos_tags
 dev_pos_tags = pos.dev_pos_tags
 
@@ -202,7 +202,7 @@ for batch in batch_generator(train_sents, BATCH_SIZE):
 
             example.append((states[0].words[states[0].index], id2tag[ys[0]], id2tag[argmax.data[0]]))
 
-            new_states = pos_model.act(states, ys)
+            new_states = pos_model.act(states, argmax.data.tolist())
 
             states = [s for s in new_states if s.index < len(s.chars) - 1]
             test_tags = [tag for tag in test_tags if tag]
