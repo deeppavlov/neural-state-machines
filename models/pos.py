@@ -96,20 +96,20 @@ class POS(nn.Module):
         for s in states:
             assert s.index < len(s.chars) - 1
             words.append(s.words[s.index-1:s.index+2])
-            char_offsets.append([len(s.chars[i]) for i in range(s.index-1, s.index+2)])
+            char_offsets.append([len(c) for c in s.chars[s.index-1:s.index+2]])
         char_offsets = [wo for co in char_offsets for wo in co]
         char_offsets.insert(0, 0)
         char_offsets.pop()
 
         prev_tag_ids = Variable(torch.LongTensor([s.outputs[s.index-1] for s in states]))
 
-        char_ids = list(chain(*[s.chars[s.index + i] for s in states for i in range(-1, 2)]))
+        char_ids = list(chain(*chain(*[s.chars[s.index-1:s.index+2] for s in states])))
         X = self.char_emb.forward(Variable(torch.LongTensor(char_ids)), offsets=Variable(torch.cumsum(torch.LongTensor(char_offsets), 0)))
         X = X.view(len(states), -1)
         WX = self.word_emb.forward(Variable(torch.LongTensor([[hash(w) % WORD_EMB_COUNT for w in ws] for ws in words])))
         WX = WX.view(WX.size(0), -1)
         # res = torch.cat([X, self.tag_emb.forward(prev_tag_ids), WX.sum(1)], 1)
-        X = X + WX
+        # X = X + WX
         res = self.W.forward(X)
         res -= res.max(1, keepdim=True)[0]
         return res.exp()
