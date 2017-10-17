@@ -53,6 +53,7 @@ class TBSyntaxParser(nn.Module):
         super().__init__()
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, HIDDEN_SIZE)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, HIDDEN_SIZE, mode='sum')
+        self.linear = nn.Linear(HIDDEN_SIZE*6, 3)
 
     def _batch_char_emb(self, batch: List[List[str]]):
         word_map = [len(ws) for ws in batch]
@@ -66,13 +67,13 @@ class TBSyntaxParser(nn.Module):
 
     def create_initial_states(self, sentences: List[List[str]]):
         states = []
-        sentences = [[WORD_EMPTY, WORD_ROOT] + sent for sent in sentences]
+        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY, WORD_EMPTY] for sent in sentences]
 
         embs, word_indexes = self._batch_char_emb(sentences)
         for i, ws in enumerate(sentences):
             buffer = embs[word_indexes[i]:word_indexes[i + 1]]
 
-            state = SyntaxState(ws, 0, {}, [(-2, buffer[0]), (-1, buffer[0]), (0, buffer[1])], buffer[2:])
+            state = SyntaxState(ws, 0, {}, [(-2, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
             states.append(state)
         return states
 
@@ -109,11 +110,115 @@ class TBSyntaxParser(nn.Module):
             new_states.append(ns)
         return new_states
 
+    def forward(self, states: List[SyntaxState]):
+        buffers = []
+        stacks = []
+        for s in states:
+            buffers.append(s.buffer[s.buffer_index: s.buffer_index + 3].view(-1))
+            stacks.append(torch.cat([st[1] for st in s.stack[-3:]]))
+
+        buffers = torch.stack(buffers)
+        stacks = torch.stack(stacks)
+        X = torch.cat([buffers, stacks], dim=1)
+        res = self.linear(X)
+        res -= res.max(1, keepdim=True)[0]
+        return res.exp()
+
 
 tbsp = TBSyntaxParser()
 
-data = [[w[1] for w in s] for s in train]
+# data = [[w[1] for w in s] for s in train]
+#
+# batch = data[:3]
+#
+# states = tbsp.create_initial_states(batch)
+#
+# res = tbsp.forward(states)
+# res = res / res.sum(1, keepdim=True)
+# pass
 
-batch = data[:3]
 
-states = tbsp.create_initial_states(batch)
+def batch_generator(seq: List, batch_size):
+    while True:
+        indexi = torch.randperm(len(seq))
+        for i in range(0, len(indexi), batch_size):
+            yield [seq[k] for k in indexi[i:i+batch_size]]
+
+
+optimizer = Adam(tbsp.parameters(), LR)
+criterion = nn.CrossEntropyLoss()
+
+seen_samples = 0
+losses = []
+for batch in batch_generator(train, BATCH_SIZE):
+    seen_samples += len(batch)
+
+    loss = Variable(torch.zeros(1))
+
+    ids, sents, heads = zip(*[zip(*sent) for sent in batch])
+    # batch_tags = [list(tags) for tags in batch_tags]
+    # states = pos_model.create_initial_states(inputs)
+    #
+    # state_max_len = max([len(s.chars)-2 for s in states])
+    # words_seen = 0
+    # correct_words = 0
+    # example = []
+    # for i in range(state_max_len):
+    #     decisions = pos_model.forward(states)
+    #     decisions /= decisions.sum(1, keepdim=True)
+    #     ys = [tagmap[tag.pop(0)] for tag in batch_tags]
+    #     loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
+    #     words_seen += len(states)
+    #
+    #     _, argmax = decisions.max(1)
+    #     correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
+    #
+    #     example.append((states[0].words[states[0].index], id2tag[ys[0]], id2tag[argmax.data[0]]))
+    #
+    #     new_states = pos_model.act(states, ys)
+    #
+    #     states = [s for s in new_states if s.index < len(s.chars) - 1]
+    #     batch_tags = [tag for tag in batch_tags if tag]
+    #
+    # assert not states
+    #
+    # loss = loss / words_seen
+    # optimizer.zero_grad()
+    # loss.backward()
+    # losses.append(loss.data[0])
+    #
+    # optimizer.step()
+    #
+    # # print(example)
+    # print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), np.mean(losses[-10:]), sep='\t')
+    #
+    # if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
+    #     inputs, test_tags = zip(*test_sents)
+    #     test_tags = [list(tags) for tags in test_tags]
+    #     states = pos_model.create_initial_states(inputs)
+    #
+    #     state_max_len = max([len(s.chars) - 2 for s in states])
+    #     words_seen = 0
+    #     correct_words = 0
+    #     loss = 0
+    #     example = []
+    #     for i in range(state_max_len):
+    #         decisions = pos_model.forward(states)
+    #         decisions /= decisions.sum(1, keepdim=True)
+    #         ys = [tagmap[tag.pop(0)] for tag in test_tags]
+    #         loss += criterion(decisions, Variable(torch.LongTensor(ys))).data[0] * len(states)
+    #         words_seen += len(states)
+    #
+    #         _, argmax = decisions.max(1)
+    #         correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
+    #
+    #         example.append((states[0].words[states[0].index], id2tag[ys[0]], id2tag[argmax.data[0]]))
+    #
+    #         new_states = pos_model.act(states, argmax.data.tolist())
+    #
+    #         states = [s for s in new_states if s.index < len(s.chars) - 1]
+    #         test_tags = [tag for tag in test_tags if tag]
+    #     assert not states
+    #     loss /= words_seen
+    #     print('Test'.ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), '{:.2f}'.format(loss).ljust(8), sep='\t')
+    #     print('Test'.ljust(8), example)
