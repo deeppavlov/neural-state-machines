@@ -79,7 +79,7 @@ class TBSyntaxParser(nn.Module):
         for i, ws in enumerate(sentences):
             buffer = embs[word_indexes[i]:word_indexes[i + 1]]
 
-            state = SyntaxState(ws[:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
+            state = SyntaxState(ws[1:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
             states.append(state)
         return states
 
@@ -94,12 +94,12 @@ class TBSyntaxParser(nn.Module):
                                  s.buffer)
             else:
                 if a == 1:  # right-arc
-                    child = s.stack[-1]
-                    head = s.stack[-2]
-
-                elif a == 2:  # left-arc
                     child = s.stack[-2]
                     head = s.stack[-1]
+
+                elif a == 2:  # left-arc
+                    child = s.stack[-1]
+                    head = s.stack[-2]
 
                 else:
                     raise RuntimeError('Unknown action index')
@@ -193,6 +193,9 @@ criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
 losses = []
+
+sents_count = len(train)
+errors_count = 0
 for batch in batch_generator(train, BATCH_SIZE):
     seen_samples += len(batch)
 
@@ -213,13 +216,24 @@ for batch in batch_generator(train, BATCH_SIZE):
             sents.append(list(ws))
             heads.append(h)
         except RuntimeError as e:
-            print()
-            print(e)
-            for i, h, ws in zip(i, h, ws):
-                print(i, h, ws)
-            pass
+            errors_count += 1
+            # print()
+            # print(e)
+            # for i, h, ws in zip(i, h, ws):
+            #     print(i, h, ws)
 
     states = tbsp.create_initial_states(sents)
+
+    state = states[0]
+    g = gold[0]
+    for g in g:
+        state = tbsp.act([state], [g])[0]
+
+    assert list(state.arcs.values()) == list(heads[0])
+
+    # 0/0
+
+print('{:.2f}% errors ({} out of {})'.format(100 * errors_count/sents_count, errors_count, sents_count))
 
     # batch_tags = [list(tags) for tags in batch_tags]
     # states = pos_model.create_initial_states(inputs)
