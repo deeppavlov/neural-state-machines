@@ -14,17 +14,23 @@ conllu = ud.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
 train = []
 for s in conllu.train:
-    sent = []
-    for w in s:
-        sent.append((w.id, w.form, w.head))
-    train.append(sent)
+    try:
+        sent = []
+        for w in s:
+            sent.append((int(w.id), w.form, int(w.head)))
+        train.append(sent)
+    except ValueError:
+        pass
 
 test = []
 for s in conllu.dev:
-    sent = []
-    for w in s:
-        sent.append((w.id, w.form, w.head))
-    test.append(sent)
+    try:
+        sent = []
+        for w in s:
+            sent.append((int(w.id), w.form, int(w.head)))
+        test.append(sent)
+    except ValueError:
+        pass
 
 SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
@@ -67,13 +73,13 @@ class TBSyntaxParser(nn.Module):
 
     def create_initial_states(self, sentences: List[List[str]]):
         states = []
-        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY, WORD_EMPTY] for sent in sentences]
+        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY, WORD_EMPTY, WORD_EMPTY] for sent in sentences]
 
         embs, word_indexes = self._batch_char_emb(sentences)
         for i, ws in enumerate(sentences):
             buffer = embs[word_indexes[i]:word_indexes[i + 1]]
 
-            state = SyntaxState(ws, 0, {}, [(-2, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
+            state = SyntaxState(ws[:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
             states.append(state)
         return states
 
@@ -139,10 +145,47 @@ tbsp = TBSyntaxParser()
 
 
 def batch_generator(seq: List, batch_size):
-    while True:
+    # while True:
         indexi = torch.randperm(len(seq))
         for i in range(0, len(indexi), batch_size):
             yield [seq[k] for k in indexi[i:i+batch_size]]
+
+
+def gold_actions(heads: List[int]):
+    """
+    >>> gold_actions([3, 3, 0])
+    [0, 0, 0, 1, 1, 2]
+    >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
+    [0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 2, 0, 2, 2]
+    """
+    w2h = {i: h for i, h in zip(range(1, len(heads)+1), heads)}
+    stack = [0, 1]
+    buffer = list(range(2, len(heads)+1))
+    actions = [0]
+
+    while buffer or len(stack) > 1:
+        if len(stack) < 2:
+            # shift
+            actions.append(0)
+            stack.append(buffer.pop(0))
+        elif (stack[-1] not in w2h.values()) and w2h[stack[-1]] == stack[-2]:
+            # left-arc
+            actions.append(2)
+            del w2h[stack[-1]]
+            stack.pop(-1)
+        elif (stack[-2] not in w2h.values()) and w2h[stack[-2]] == stack[-1]:
+            # right-arc
+            actions.append(1)
+            del w2h[stack[-2]]
+            stack.pop(-2)
+        else:
+            if not buffer:
+                raise RuntimeError('Wrong sentence markup')
+            # shift
+            actions.append(0)
+            stack.append(buffer.pop(0))
+
+    return actions
 
 
 optimizer = Adam(tbsp.parameters(), LR)
@@ -155,7 +198,29 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     loss = Variable(torch.zeros(1))
 
-    ids, sents, heads = zip(*[zip(*sent) for sent in batch])
+    # ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+    # sents = [list(ws) for ws in sents]
+
+    ids = []
+    sents = []
+    heads = []
+    gold = []
+    for sent in batch:
+        i, ws, h = zip(*sent)
+        try:
+            gold.append(gold_actions(h))
+            ids.append(i)
+            sents.append(list(ws))
+            heads.append(h)
+        except RuntimeError as e:
+            print()
+            print(e)
+            for i, h, ws in zip(i, h, ws):
+                print(i, h, ws)
+            pass
+
+    states = tbsp.create_initial_states(sents)
+
     # batch_tags = [list(tags) for tags in batch_tags]
     # states = pos_model.create_initial_states(inputs)
     #
@@ -222,3 +287,16 @@ for batch in batch_generator(train, BATCH_SIZE):
     #     loss /= words_seen
     #     print('Test'.ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), '{:.2f}'.format(loss).ljust(8), sep='\t')
     #     print('Test'.ljust(8), example)
+
+
+
+
+
+
+
+
+
+
+
+
+
