@@ -146,6 +146,7 @@ class TBSyntaxParser(nn.Module):
         new_states = []
         for s, a in zip(states, actions):
             if a == 0:  # shift
+                assert s.buffer_index + 3 < len(s.buffer)
                 ns = SyntaxState(s.words,
                                  s.buffer_index + 1,
                                  s.arcs,
@@ -153,10 +154,12 @@ class TBSyntaxParser(nn.Module):
                                  s.buffer)
             else:
                 if a == 1:  # right-arc
+                    assert len(s.stack) > 4
                     child = s.stack[-2]
                     head = s.stack[-1]
 
                 elif a == 2:  # left-arc
+                    assert len(s.stack) > 3
                     child = s.stack[-1]
                     head = s.stack[-2]
 
@@ -182,16 +185,23 @@ class TBSyntaxParser(nn.Module):
     def forward(self, states: List[SyntaxState]):
         buffers = []
         stacks = []
-        for s in states:
+        legal_actions = Variable(torch.zeros(len(states), 3) + 1)
+        for i, s in enumerate(states):
             buffers.append(s.buffer[s.buffer_index: s.buffer_index + 3].view(-1))
             stacks.append(torch.cat([st[1] for st in s.stack[-3:]]))
+            if s.buffer_index + 3 >= len(s.buffer):
+                legal_actions[i, 0] = 0
+            if len(s.stack) <= 4:
+                legal_actions[i, 1] = 0
+            if len(s.stack) <= 3:
+                legal_actions[i, 2] = 0
 
         buffers = torch.stack(buffers)
         stacks = torch.stack(stacks)
         X = torch.cat([buffers, stacks], dim=1)
         res = self.linear(X)
         res -= res.max(1, keepdim=True)[0]
-        return res.exp()
+        return res.exp() * legal_actions
 
 
 parser = TBSyntaxParser()
@@ -262,7 +272,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
                 batch_ga.pop(i)
                 heads.pop(i)
 
-
     assert not states
 
     loss = loss / total_actions
@@ -276,8 +285,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_actions / total_actions * 100), np.mean(losses[-10:]), sep='\t')
 
     if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
-
-        seen_samples += len(batch)
 
         batch = list(deepcopy(test))
         batch_ga = list(deepcopy(test_ga))
@@ -300,12 +307,9 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         while states:
             decisions = parser.forward(states)
             decisions /= decisions.sum(1, keepdim=True)
-            # ys = [s.pop(0) for s in batch_ga]
-            # loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
             total_actions += len(states)
 
             _, argmax = decisions.max(1)
-            # correct_actions += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
 
             # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
@@ -313,20 +317,18 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
             terminated = TBSyntaxParser.terminated(states)
 
-            for i in reversed(range(len(batch_ga))):
+            for i in reversed(range(len(terminated))):
                 if terminated[i]:
                     total_heads += len(heads[i])
                     for w in range(len(heads[i])):
                         if states[i].arcs[w + 1] == heads[i][w]:
                             correct_heads += 1
                     states.pop(i)
-                    batch_ga.pop(i)
                     heads.pop(i)
 
         assert not states
 
-        print('TEST', '{:.2f}'.format(seen_samples).ljust(8),
-              # '{:.1f}%'.format(correct_actions / total_actions * 100),
+        print('TEST', '{}'.format(len(test)).ljust(8),
               '{:.1f}%'.format(correct_heads / total_heads * 100),
               sep='\t')
 
