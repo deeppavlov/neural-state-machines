@@ -13,6 +13,18 @@ from copy import deepcopy
 from data_providers.ud_pos import pos as ud
 
 
+STOP_AFTER_SAMPLES = 2 * 1000
+TEST_EVERY_SAMPLES = 200
+CHAR_EMB_COUNT = 500
+WORD_EMB_COUNT = 30 * 1000
+HIDDEN_SIZE = 50
+LR = 0.01
+BATCH_SIZE = 29
+
+WORD_ROOT = ' '
+WORD_EMPTY = '\t'
+
+
 def batch_generator(seq: Iterator, batch_size):
     seq = list(seq)
     while True:
@@ -61,7 +73,7 @@ def gold_actions(heads: List[int]):
 conllu = ud.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
 train = []
-train_y = []
+train_ga = []
 train_gold_errors = 0
 for s in conllu.train:
     try:
@@ -70,14 +82,14 @@ for s in conllu.train:
             sent.append((int(w.id), w.form, int(w.head)))
         ga = gold_actions([e[2] for e in sent])
         train.append(sent)
-        train_y.append(ga)
+        train_ga.append(ga)
     except ValueError:
         pass
     except RuntimeError:
         train_gold_errors += 1
 
 test = []
-test_y = []
+test_ga = []
 test_gold_errors = 0
 for s in conllu.dev:
     try:
@@ -86,32 +98,19 @@ for s in conllu.dev:
             sent.append((int(w.id), w.form, int(w.head)))
         ga = gold_actions([e[2] for e in sent])
         test.append(sent)
-        train_y.append(ga)
+        train_ga.append(ga)
     except ValueError:
         pass
     except RuntimeError:
         test_gold_errors += 1
-
-SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
-
-# POSState = namedtuple('POSState', 'chars words index outputs')
-#
-# STOP_AFTER_SAMPLES = 10 * 1000
-# TEST_EVERY_SAMPLES = 6000
-CHAR_EMB_COUNT = 500
-WORD_EMB_COUNT = 30 * 1000
-HIDDEN_SIZE = 50
-LR = 0.01
-BATCH_SIZE = 29
-
-WORD_ROOT = ' '
-WORD_EMPTY = '\t'
 
 
 def char_emb_ids(word: str, embeddings_count, embedding_length=3):
     w = ' ' + word + ' '
     n = len(w)
     return [hash(w[i:i + n + 1]) % embeddings_count for i in range(n - embedding_length + 1)]
+
+SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
 
 class TBSyntaxParser(nn.Module):
@@ -178,7 +177,7 @@ class TBSyntaxParser(nn.Module):
 
     @staticmethod
     def terminated(states):
-        return [s.buffer_index + 4 == len(s.buffer) and len(s.stack) == 3 for s in states]
+        return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
 
     def forward(self, states: List[SyntaxState]):
         buffers = []
@@ -214,47 +213,59 @@ criterion = nn.CrossEntropyLoss()
 seen_samples = 0
 losses = []
 
-for batch in batch_generator(zip(train, train_y), BATCH_SIZE):
+for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     batch, batch_ga = zip(*batch)
     seen_samples += len(batch)
 
+    batch = list(deepcopy(batch))
     batch_ga = list(deepcopy(batch_ga))
 
     loss = Variable(torch.zeros(1))
 
     ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+    heads = list(heads)
     sents = [list(ws) for ws in sents]
 
     states = parser.create_initial_states(sents)
 
-    words_seen = 0
-    correct_words = 0
+    correct_actions = 0
+    total_actions = 0
+
+    correct_heads = 0
+    total_heads = 0
+
     example = []
     while states:
         decisions = parser.forward(states)
         decisions /= decisions.sum(1, keepdim=True)
         ys = [s.pop(0) for s in batch_ga]
         loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
-        words_seen += len(states)
+        total_actions += len(states)
 
         _, argmax = decisions.max(1)
-        correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
+        correct_actions += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
 
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
         states = parser.act(states, ys)
 
-        # terminated = TBSyntaxParser.terminated(states)
+        terminated = TBSyntaxParser.terminated(states)
 
         for i in reversed(range(len(batch_ga))):
             if not batch_ga[i]:
+                assert terminated[i]
+                total_heads += len(heads[i])
+                for w in range(len(heads[i])):
+                    if states[i].arcs[w+1] == heads[i][w]:
+                        correct_heads += 1
                 states.pop(i)
                 batch_ga.pop(i)
+                heads.pop(i)
 
 
     assert not states
 
-    loss = loss / words_seen
+    loss = loss / total_actions
     optimizer.zero_grad()
     loss.backward()
     losses.append(loss.data[0])
@@ -262,48 +273,62 @@ for batch in batch_generator(zip(train, train_y), BATCH_SIZE):
     optimizer.step()
 
     # print(example)
-    print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), np.mean(losses[-10:]), sep='\t')
+    print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_actions / total_actions * 100), np.mean(losses[-10:]), sep='\t')
 
-    # if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
-    #     inputs, test_tags = zip(*test_sents)
-    #     test_tags = [list(tags) for tags in test_tags]
-    #     states = pos_model.create_initial_states(inputs)
-    #
-    #     state_max_len = max([len(s.chars) - 2 for s in states])
-    #     words_seen = 0
-    #     correct_words = 0
-    #     loss = 0
-    #     example = []
-    #     for i in range(state_max_len):
-    #         decisions = pos_model.forward(states)
-    #         decisions /= decisions.sum(1, keepdim=True)
-    #         ys = [tagmap[tag.pop(0)] for tag in test_tags]
-    #         loss += criterion(decisions, Variable(torch.LongTensor(ys))).data[0] * len(states)
-    #         words_seen += len(states)
-    #
-    #         _, argmax = decisions.max(1)
-    #         correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
-    #
-    #         example.append((states[0].words[states[0].index], id2tag[ys[0]], id2tag[argmax.data[0]]))
-    #
-    #         new_states = pos_model.act(states, argmax.data.tolist())
-    #
-    #         states = [s for s in new_states if s.index < len(s.chars) - 1]
-    #         test_tags = [tag for tag in test_tags if tag]
-    #     assert not states
-    #     loss /= words_seen
-    #     print('Test'.ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), '{:.2f}'.format(loss).ljust(8), sep='\t')
-    #     print('Test'.ljust(8), example)
+    if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
 
+        seen_samples += len(batch)
 
+        batch = list(deepcopy(test))
+        batch_ga = list(deepcopy(test_ga))
 
+        loss = Variable(torch.zeros(1))
 
+        ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+        heads = list(heads)
+        sents = [list(ws) for ws in sents]
 
+        states = parser.create_initial_states(sents)
 
+        correct_actions = 0
+        total_actions = 0
 
+        correct_heads = 0
+        total_heads = 0
 
+        example = []
+        while states:
+            decisions = parser.forward(states)
+            decisions /= decisions.sum(1, keepdim=True)
+            # ys = [s.pop(0) for s in batch_ga]
+            # loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
+            total_actions += len(states)
 
+            _, argmax = decisions.max(1)
+            # correct_actions += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
 
+            # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
+            states = parser.act(states, argmax.data.tolist())
 
+            terminated = TBSyntaxParser.terminated(states)
 
+            for i in reversed(range(len(batch_ga))):
+                if terminated[i]:
+                    total_heads += len(heads[i])
+                    for w in range(len(heads[i])):
+                        if states[i].arcs[w + 1] == heads[i][w]:
+                            correct_heads += 1
+                    states.pop(i)
+                    batch_ga.pop(i)
+                    heads.pop(i)
+
+        assert not states
+
+        print('TEST', '{:.2f}'.format(seen_samples).ljust(8),
+              # '{:.1f}%'.format(correct_actions / total_actions * 100),
+              '{:.1f}%'.format(correct_heads / total_heads * 100),
+              sep='\t')
+
+    if seen_samples > STOP_AFTER_SAMPLES:
+        break
