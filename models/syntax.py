@@ -1,6 +1,6 @@
 from collections import namedtuple
 from itertools import chain
-from typing import List
+from typing import List, Iterator
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,29 +8,89 @@ from torch.autograd import Variable
 from torch.optim import Adam
 import numpy as np
 
+from copy import deepcopy
+
 from data_providers.ud_pos import pos as ud
+
+
+def batch_generator(seq: Iterator, batch_size):
+    seq = list(seq)
+    while True:
+        indexi = torch.randperm(len(seq))
+        for i in range(0, len(indexi), batch_size):
+            yield [seq[k] for k in indexi[i:i+batch_size]]
+
+
+def gold_actions(heads: List[int]):
+    """
+    >>> gold_actions([3, 3, 0])
+    [0, 0, 0, 1, 1, 2]
+    >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
+    [0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 2, 0, 2, 2]
+    """
+    w2h = {i: h for i, h in zip(range(1, len(heads)+1), heads)}
+    stack = [0, 1]
+    buffer = list(range(2, len(heads)+1))
+    actions = [0]
+
+    while buffer or len(stack) > 1:
+        if len(stack) < 2:
+            # shift
+            actions.append(0)
+            stack.append(buffer.pop(0))
+        elif (stack[-1] not in w2h.values()) and w2h[stack[-1]] == stack[-2]:
+            # left-arc
+            actions.append(2)
+            del w2h[stack[-1]]
+            stack.pop(-1)
+        elif (stack[-2] not in w2h.values()) and w2h[stack[-2]] == stack[-1]:
+            # right-arc
+            actions.append(1)
+            del w2h[stack[-2]]
+            stack.pop(-2)
+        else:
+            if not buffer:
+                raise RuntimeError('Wrong sentence markup')
+            # shift
+            actions.append(0)
+            stack.append(buffer.pop(0))
+
+    return actions
+
 
 conllu = ud.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
 train = []
+train_y = []
+train_gold_errors = 0
 for s in conllu.train:
     try:
         sent = []
         for w in s:
             sent.append((int(w.id), w.form, int(w.head)))
+        ga = gold_actions([e[2] for e in sent])
         train.append(sent)
+        train_y.append(ga)
     except ValueError:
         pass
+    except RuntimeError:
+        train_gold_errors += 1
 
 test = []
+test_y = []
+test_gold_errors = 0
 for s in conllu.dev:
     try:
         sent = []
         for w in s:
             sent.append((int(w.id), w.form, int(w.head)))
+        ga = gold_actions([e[2] for e in sent])
         test.append(sent)
+        train_y.append(ga)
     except ValueError:
         pass
+    except RuntimeError:
+        test_gold_errors += 1
 
 SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
@@ -116,6 +176,10 @@ class TBSyntaxParser(nn.Module):
             new_states.append(ns)
         return new_states
 
+    @staticmethod
+    def terminated(states):
+        return [s.buffer_index + 4 == len(s.buffer) and len(s.stack) == 3 for s in states]
+
     def forward(self, states: List[SyntaxState]):
         buffers = []
         stacks = []
@@ -131,7 +195,7 @@ class TBSyntaxParser(nn.Module):
         return res.exp()
 
 
-tbsp = TBSyntaxParser()
+parser = TBSyntaxParser()
 
 # data = [[w[1] for w in s] for s in train]
 #
@@ -144,133 +208,62 @@ tbsp = TBSyntaxParser()
 # pass
 
 
-def batch_generator(seq: List, batch_size):
-    # while True:
-        indexi = torch.randperm(len(seq))
-        for i in range(0, len(indexi), batch_size):
-            yield [seq[k] for k in indexi[i:i+batch_size]]
-
-
-def gold_actions(heads: List[int]):
-    """
-    >>> gold_actions([3, 3, 0])
-    [0, 0, 0, 1, 1, 2]
-    >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
-    [0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 2, 0, 2, 2]
-    """
-    w2h = {i: h for i, h in zip(range(1, len(heads)+1), heads)}
-    stack = [0, 1]
-    buffer = list(range(2, len(heads)+1))
-    actions = [0]
-
-    while buffer or len(stack) > 1:
-        if len(stack) < 2:
-            # shift
-            actions.append(0)
-            stack.append(buffer.pop(0))
-        elif (stack[-1] not in w2h.values()) and w2h[stack[-1]] == stack[-2]:
-            # left-arc
-            actions.append(2)
-            del w2h[stack[-1]]
-            stack.pop(-1)
-        elif (stack[-2] not in w2h.values()) and w2h[stack[-2]] == stack[-1]:
-            # right-arc
-            actions.append(1)
-            del w2h[stack[-2]]
-            stack.pop(-2)
-        else:
-            if not buffer:
-                raise RuntimeError('Wrong sentence markup')
-            # shift
-            actions.append(0)
-            stack.append(buffer.pop(0))
-
-    return actions
-
-
-optimizer = Adam(tbsp.parameters(), LR)
+optimizer = Adam(parser.parameters(), LR)
 criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
 losses = []
 
-sents_count = len(train)
-errors_count = 0
-for batch in batch_generator(train, BATCH_SIZE):
+for batch in batch_generator(zip(train, train_y), BATCH_SIZE):
+    batch, batch_ga = zip(*batch)
     seen_samples += len(batch)
+
+    batch_ga = list(deepcopy(batch_ga))
 
     loss = Variable(torch.zeros(1))
 
-    # ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
-    # sents = [list(ws) for ws in sents]
+    ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+    sents = [list(ws) for ws in sents]
 
-    ids = []
-    sents = []
-    heads = []
-    gold = []
-    for sent in batch:
-        i, ws, h = zip(*sent)
-        try:
-            gold.append(gold_actions(h))
-            ids.append(i)
-            sents.append(list(ws))
-            heads.append(h)
-        except RuntimeError as e:
-            errors_count += 1
-            # print()
-            # print(e)
-            # for i, h, ws in zip(i, h, ws):
-            #     print(i, h, ws)
+    states = parser.create_initial_states(sents)
 
-    states = tbsp.create_initial_states(sents)
+    words_seen = 0
+    correct_words = 0
+    example = []
+    while states:
+        decisions = parser.forward(states)
+        decisions /= decisions.sum(1, keepdim=True)
+        ys = [s.pop(0) for s in batch_ga]
+        loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
+        words_seen += len(states)
 
-    state = states[0]
-    g = gold[0]
-    for g in g:
-        state = tbsp.act([state], [g])[0]
+        _, argmax = decisions.max(1)
+        correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
 
-    assert list(state.arcs.values()) == list(heads[0])
+        # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
-    # 0/0
+        states = parser.act(states, ys)
 
-print('{:.2f}% errors ({} out of {})'.format(100 * errors_count/sents_count, errors_count, sents_count))
+        # terminated = TBSyntaxParser.terminated(states)
 
-    # batch_tags = [list(tags) for tags in batch_tags]
-    # states = pos_model.create_initial_states(inputs)
-    #
-    # state_max_len = max([len(s.chars)-2 for s in states])
-    # words_seen = 0
-    # correct_words = 0
-    # example = []
-    # for i in range(state_max_len):
-    #     decisions = pos_model.forward(states)
-    #     decisions /= decisions.sum(1, keepdim=True)
-    #     ys = [tagmap[tag.pop(0)] for tag in batch_tags]
-    #     loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
-    #     words_seen += len(states)
-    #
-    #     _, argmax = decisions.max(1)
-    #     correct_words += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
-    #
-    #     example.append((states[0].words[states[0].index], id2tag[ys[0]], id2tag[argmax.data[0]]))
-    #
-    #     new_states = pos_model.act(states, ys)
-    #
-    #     states = [s for s in new_states if s.index < len(s.chars) - 1]
-    #     batch_tags = [tag for tag in batch_tags if tag]
-    #
-    # assert not states
-    #
-    # loss = loss / words_seen
-    # optimizer.zero_grad()
-    # loss.backward()
-    # losses.append(loss.data[0])
-    #
-    # optimizer.step()
-    #
-    # # print(example)
-    # print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), np.mean(losses[-10:]), sep='\t')
-    #
+        for i in reversed(range(len(batch_ga))):
+            if not batch_ga[i]:
+                states.pop(i)
+                batch_ga.pop(i)
+
+
+    assert not states
+
+    loss = loss / words_seen
+    optimizer.zero_grad()
+    loss.backward()
+    losses.append(loss.data[0])
+
+    optimizer.step()
+
+    # print(example)
+    print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_words/words_seen*100), np.mean(losses[-10:]), sep='\t')
+
     # if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
     #     inputs, test_tags = zip(*test_sents)
     #     test_tags = [list(tags) for tags in test_tags]
