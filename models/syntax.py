@@ -1,5 +1,6 @@
 from collections import namedtuple
 from itertools import chain
+from time import time
 from typing import List, Iterator
 import torch
 import torch.nn as nn
@@ -13,9 +14,9 @@ from copy import deepcopy
 from data_providers.ud_pos import pos as ud
 
 
-STOP_AFTER_SAMPLES = 2 * 1000
+STOP_AFTER_SAMPLES = 200 * 1000
 TEST_EVERY_SAMPLES = 2000
-CHAR_EMB_COUNT = 500
+CHAR_EMB_COUNT = 1000
 WORD_EMB_COUNT = 30 * 1000
 HIDDEN_SIZE = 50
 LR = 0.01
@@ -285,6 +286,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_actions / total_actions * 100), np.mean(losses[-10:]), sep='\t')
 
     if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
+        test_started = time()
 
         batch = list(deepcopy(test))
         batch_ga = list(deepcopy(test_ga))
@@ -328,9 +330,13 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
         assert not states
 
+        test_duration = (time() - test_started)
+        test_total_tokens_count = sum([len(s) for s in test])
+        token_per_sec = test_total_tokens_count / test_duration
         print('TEST', '{}'.format(len(test)).ljust(8),
               '{:.1f}%'.format(correct_heads / total_heads * 100),
+              '{:.1f} w/s'.format(token_per_sec),
               sep='\t')
 
-    # if seen_samples > STOP_AFTER_SAMPLES:
-    #     break
+    if seen_samples > STOP_AFTER_SAMPLES:
+        break
