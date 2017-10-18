@@ -14,7 +14,7 @@ from data_providers.ud_pos import pos as ud
 
 
 STOP_AFTER_SAMPLES = 2 * 1000
-TEST_EVERY_SAMPLES = 200
+TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 500
 WORD_EMB_COUNT = 30 * 1000
 HIDDEN_SIZE = 50
@@ -199,8 +199,8 @@ class TBSyntaxParser(nn.Module):
         buffers = torch.stack(buffers)
         stacks = torch.stack(stacks)
         X = torch.cat([buffers, stacks], dim=1)
-        res = self.linear(X)
-        res -= res.max(1, keepdim=True)[0]
+        res = torch.clamp(self.linear(X), 1e-5, 10)
+        # res -= res.max(1, keepdim=True)[0]
         return res.exp() * legal_actions
 
 
@@ -332,5 +332,5 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
               '{:.1f}%'.format(correct_heads / total_heads * 100),
               sep='\t')
 
-    if seen_samples > STOP_AFTER_SAMPLES:
-        break
+    # if seen_samples > STOP_AFTER_SAMPLES:
+    #     break
