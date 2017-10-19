@@ -189,7 +189,7 @@ class TBSyntaxParser(nn.Module):
         char_embs, word_indexes = self._batch_char_emb(sentences)
 
         for i, (ws, ids) in enumerate(zip(sentences, id_sents)):
-            words_embeddings = self.word_emb(Variable(torch.LongTensor(ids)))
+            words_embeddings = self.word_emb(self.set_device(Variable(torch.LongTensor(ids))))
             chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
             buffer = words_embeddings + chars_embeddings
