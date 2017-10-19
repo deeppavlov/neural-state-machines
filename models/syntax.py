@@ -1,4 +1,4 @@
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 from itertools import chain
 from time import time
 from typing import List, Iterator
@@ -17,14 +17,18 @@ from data_providers.ud_pos import pos as ud
 
 STOP_AFTER_SAMPLES = 200 * 1000
 TEST_EVERY_SAMPLES = 2000
-CHAR_EMB_COUNT = 1000
-WORD_EMB_COUNT = 30 * 1000
+CHAR_EMB_COUNT = 5000
+WORD_EMB_COUNT = 100 * 1000
 HIDDEN_SIZE = 50
 LR = 0.01
-BATCH_SIZE = 29
+BATCH_SIZE = 64
 
 WORD_ROOT = ' '
 WORD_EMPTY = '\t'
+WORD_EMPTY_ID = 2
+WORD_ROOT_ID = 1
+WORD_UNKNOWN_ID = 0
+
 
 
 def batch_generator(seq: Iterator, batch_size):
@@ -72,8 +76,40 @@ def gold_actions(heads: List[int]):
     return actions
 
 
+def create_dictionary(words, reserved_ids=None, min_count=2):
+    if reserved_ids is None:
+        reserved_ids = {}
+    word_counts = defaultdict(int)
+    word_ids = dict()
+    next_id = max(chain([-1], reserved_ids.values())) + 1
+
+    for w in words:
+        word_counts[w] += 1
+        if w not in word_ids:
+            word_ids[w] = next_id
+            next_id += 1
+
+    # shrink resulting dictionary
+    result = dict(reserved_ids)
+    next_id = max(chain([-1], reserved_ids.values())) + 1
+    for w, i in word_ids.items():
+        if word_counts[w] >= min_count:
+            result[w] = next_id
+            next_id += 1
+
+    return result
+
+assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
+                                                                                          {' ': 0, 'a': 2, 'c': 1}]
+
+
 conllu = ud.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
+
+dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
+                               reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID, WORD_EMPTY: WORD_EMPTY_ID})
+print('Dictionary has {} elements'.format(len(dictionary)))
+
 train = []
 train_ga = []
 train_gold_errors = 0
@@ -81,7 +117,8 @@ for s in conllu.train:
     try:
         sent = []
         for w in s:
-            sent.append((int(w.id), w.form, int(w.head)))
+            int(w.id)  # crash if not integer
+            sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
         ga = gold_actions([e[2] for e in sent])
         train.append(sent)
         train_ga.append(ga)
@@ -97,7 +134,8 @@ for s in conllu.dev:
     try:
         sent = []
         for w in s:
-            sent.append((int(w.id), w.form, int(w.head)))
+            int(w.id)
+            sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
         ga = gold_actions([e[2] for e in sent])
         test.append(sent)
         train_ga.append(ga)
@@ -143,13 +181,19 @@ class TBSyntaxParser(nn.Module):
                              self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
         return embs, np.cumsum([0] + word_map)
 
-    def create_initial_states(self, sentences: List[List[str]]):
+    def create_initial_states(self, sentences: List[List[str]], ids: List[List[int]]):
         states = []
-        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY, WORD_EMPTY, WORD_EMPTY] for sent in sentences]
+        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY]*3 for sent in sentences]
+        id_sents = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID]*3 for sent in ids]
 
-        embs, word_indexes = self._batch_char_emb(sentences)
-        for i, ws in enumerate(sentences):
-            buffer = embs[word_indexes[i]:word_indexes[i + 1]]
+        char_embs, word_indexes = self._batch_char_emb(sentences)
+
+        for i, (ws, ids) in enumerate(zip(sentences, id_sents)):
+            words_embeddings = self.word_emb(Variable(torch.LongTensor(ids)))
+            chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
+            # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
+            buffer = words_embeddings + chars_embeddings
+
 
             state = SyntaxState(ws[1:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
             states.append(state)
@@ -223,7 +267,7 @@ device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
     parser.cuda(device_id)
 
-optimizer = Adam(parser.parameters(), LR)
+optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9))
 criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
@@ -241,8 +285,9 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
     heads = list(heads)
     sents = [list(ws) for ws in sents]
+    ids = [list(ws) for ws in ids]
 
-    states = parser.create_initial_states(sents)
+    states = parser.create_initial_states(sents, ids)
 
     correct_actions = 0
     total_actions = 0
@@ -299,8 +344,10 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
         sents = [list(ws) for ws in sents]
+        ids = [list(ws) for ws in ids]
 
-        states = parser.create_initial_states(sents)
+
+        states = parser.create_initial_states(sents, ids)
 
         correct_actions = 0
         total_actions = 0
