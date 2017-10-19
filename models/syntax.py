@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.optim import Adam
 import numpy as np
+import os
 
 from copy import deepcopy
 
@@ -15,7 +16,7 @@ from data_providers.ud_pos import pos as ud
 
 
 STOP_AFTER_SAMPLES = 200 * 1000
-TEST_EVERY_SAMPLES = 2000
+TEST_EVERY_SAMPLES = 200
 CHAR_EMB_COUNT = 1000
 WORD_EMB_COUNT = 30 * 1000
 HIDDEN_SIZE = 50
@@ -121,14 +122,25 @@ class TBSyntaxParser(nn.Module):
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, HIDDEN_SIZE, mode='sum')
         self.linear = nn.Linear(HIDDEN_SIZE*6, 3)
 
+        self.set_device = None
+        self.cpu()
+
+    def cuda(self, device_id=None):
+        super().cuda(device_id)
+        self.set_device = lambda x: x.cuda(device_id)
+
+    def cpu(self):
+        super().cpu()
+        self.set_device = lambda x: x.cpu()
+
     def _batch_char_emb(self, batch: List[List[str]]):
         word_map = [len(ws) for ws in batch]
         batch = list(chain(*[[char_emb_ids(w, CHAR_EMB_COUNT) for w in ws] for ws in batch]))
         offsets = [len(w) for w in batch]
         offsets.insert(0, 0)
         offsets.pop()
-        embs = self.char_emb(Variable(torch.LongTensor(list(chain(*batch)))),
-                             Variable(torch.cumsum(torch.LongTensor(offsets), 0)))
+        embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*batch))))),
+                             self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
         return embs, np.cumsum([0] + word_map)
 
     def create_initial_states(self, sentences: List[List[str]]):
@@ -186,7 +198,7 @@ class TBSyntaxParser(nn.Module):
     def forward(self, states: List[SyntaxState]):
         buffers = []
         stacks = []
-        legal_actions = Variable(torch.zeros(len(states), 3) + 1)
+        legal_actions = np.zeros([len(states), 3]) + 1
         for i, s in enumerate(states):
             buffers.append(s.buffer[s.buffer_index: s.buffer_index + 3].view(-1))
             stacks.append(torch.cat([st[1] for st in s.stack[-3:]]))
@@ -202,21 +214,14 @@ class TBSyntaxParser(nn.Module):
         X = torch.cat([buffers, stacks], dim=1)
         res = torch.clamp(self.linear(X), 1e-5, 10)
         # res -= res.max(1, keepdim=True)[0]
-        return res.exp() * legal_actions
+        return res.exp() * self.set_device(Variable(torch.FloatTensor(legal_actions)))
 
 
 parser = TBSyntaxParser()
 
-# data = [[w[1] for w in s] for s in train]
-#
-# batch = data[:3]
-#
-# states = tbsp.create_initial_states(batch)
-#
-# res = tbsp.forward(states)
-# res = res / res.sum(1, keepdim=True)
-# pass
-
+device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
+if device_id >= 0:
+    parser.cuda(device_id)
 
 optimizer = Adam(parser.parameters(), LR)
 criterion = nn.CrossEntropyLoss()
@@ -231,7 +236,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     batch = list(deepcopy(batch))
     batch_ga = list(deepcopy(batch_ga))
 
-    loss = Variable(torch.zeros(1))
+    loss = parser.set_device(Variable(torch.zeros(1)))
 
     ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
     heads = list(heads)
@@ -250,11 +255,11 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         decisions = parser.forward(states)
         decisions /= decisions.sum(1, keepdim=True)
         ys = [s.pop(0) for s in batch_ga]
-        loss += criterion(decisions, Variable(torch.LongTensor(ys))) * len(states)
+        loss += criterion(decisions, parser.set_device(Variable(torch.LongTensor(ys)))) * len(states)
         total_actions += len(states)
 
         _, argmax = decisions.max(1)
-        correct_actions += (argmax == Variable(torch.LongTensor(ys))).long().sum().data[0]
+        correct_actions += (argmax == parser.set_device(Variable(torch.LongTensor(ys)))).long().sum().data[0]
 
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
@@ -291,8 +296,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         batch = list(deepcopy(test))
         batch_ga = list(deepcopy(test_ga))
 
-        loss = Variable(torch.zeros(1))
-
         ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
         sents = [list(ws) for ws in sents]
@@ -312,10 +315,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
             total_actions += len(states)
 
             _, argmax = decisions.max(1)
-
-            # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
-
-            states = parser.act(states, argmax.data.tolist())
+            states = parser.act(states, argmax.data.cpu().tolist())
 
             terminated = TBSyntaxParser.terminated(states)
 
