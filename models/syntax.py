@@ -1,3 +1,4 @@
+import random
 from collections import namedtuple, defaultdict
 from itertools import chain
 from time import time
@@ -29,14 +30,24 @@ WORD_EMPTY_ID = 2
 WORD_ROOT_ID = 1
 WORD_UNKNOWN_ID = 0
 
+BUCKETS_COUNT = 8
 
 
 def batch_generator(seq: Iterator, batch_size):
     seq = list(seq)
     while True:
-        indexi = torch.randperm(len(seq))
-        for i in range(0, len(indexi), batch_size):
-            yield [seq[k] for k in indexi[i:i+batch_size]]
+        # indexi = torch.randperm(len(seq))
+        # for i in range(0, len(indexi), batch_size):
+        #     yield [seq[k] for k in indexi[i:i+batch_size]]
+
+        random.shuffle(seq)
+        bucket_size = 1 + (len(seq) - 1) // BUCKETS_COUNT
+        buckets = [seq[i*bucket_size:(1+i)*bucket_size] for i in range(BUCKETS_COUNT)]
+
+        buckets = [ex for i, bucket in enumerate(buckets) for ex in sorted(bucket, reverse=bool(i % 2))]
+
+        for i in range(0, len(buckets), batch_size):
+            yield buckets[i:i+batch_size]
 
 
 def gold_actions(heads: List[int]):
@@ -126,6 +137,7 @@ for s in conllu.train:
         pass
     except RuntimeError:
         train_gold_errors += 1
+print('Train has {} examples'.format(len(train)))
 
 test = []
 test_ga = []
@@ -273,7 +285,9 @@ criterion = nn.CrossEntropyLoss()
 seen_samples = 0
 losses = []
 
+times = []
 for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
+    start = time()
     batch, batch_ga = zip(*batch)
     seen_samples += len(batch)
 
@@ -332,8 +346,13 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
     optimizer.step()
 
+    times.append(time() - start)
     # print(example)
-    print('{:.2f}'.format(seen_samples).ljust(8), '{:.1f}%'.format(correct_actions / total_actions * 100), np.mean(losses[-10:]), sep='\t')
+    print('{:.2f}'.format(seen_samples).ljust(8),
+          '{:.1f}%'.format(correct_actions / total_actions * 100),
+          np.mean(losses[-10:]),
+          '{:.3f}s'.format(sum(times)/len(times)),
+          sep='\t')
 
     if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
         test_started = time()
