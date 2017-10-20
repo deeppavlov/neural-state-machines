@@ -2,7 +2,7 @@ import random
 from collections import namedtuple, defaultdict
 from itertools import chain
 from time import time
-from typing import List, Iterator
+from typing import List, Iterator, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,7 +14,6 @@ import os
 from copy import deepcopy
 
 from data_providers.ud_pos import pos as ud
-
 
 STOP_AFTER_SAMPLES = 200 * 1000
 TEST_EVERY_SAMPLES = 2000
@@ -42,12 +41,12 @@ def batch_generator(seq: Iterator, batch_size):
 
         random.shuffle(seq)
         bucket_size = 1 + (len(seq) - 1) // BUCKETS_COUNT
-        buckets = [seq[i*bucket_size:(1+i)*bucket_size] for i in range(BUCKETS_COUNT)]
+        buckets = [seq[i * bucket_size:(1 + i) * bucket_size] for i in range(BUCKETS_COUNT)]
 
         buckets = [ex for i, bucket in enumerate(buckets) for ex in sorted(bucket, reverse=bool(i % 2))]
 
         for i in range(0, len(buckets), batch_size):
-            yield buckets[i:i+batch_size]
+            yield buckets[i:i + batch_size]
 
 
 def gold_actions(heads: List[int]):
@@ -57,9 +56,9 @@ def gold_actions(heads: List[int]):
     >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
     [0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 2, 0, 2, 2]
     """
-    w2h = {i: h for i, h in zip(range(1, len(heads)+1), heads)}
+    w2h = {i: h for i, h in zip(range(1, len(heads) + 1), heads)}
     stack = [0, 1]
-    buffer = list(range(2, len(heads)+1))
+    buffer = list(range(2, len(heads) + 1))
     actions = [0]
 
     while buffer or len(stack) > 1:
@@ -68,13 +67,13 @@ def gold_actions(heads: List[int]):
             actions.append(0)
             stack.append(buffer.pop(0))
         elif (stack[-1] not in w2h.values()) and w2h[stack[-1]] == stack[-2]:
-            # left-arc
-            actions.append(2)
+            # right-arc
+            actions.append(1)
             del w2h[stack[-1]]
             stack.pop(-1)
         elif (stack[-2] not in w2h.values()) and w2h[stack[-2]] == stack[-1]:
-            # right-arc
-            actions.append(1)
+            # left-arc
+            actions.append(2)
             del w2h[stack[-2]]
             stack.pop(-2)
         else:
@@ -110,15 +109,16 @@ def create_dictionary(words, reserved_ids=None, min_count=2):
 
     return result
 
+
 assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
-
 
 conllu = ud.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
 
 dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
-                               reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID, WORD_EMPTY: WORD_EMPTY_ID})
+                               reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
+                                             WORD_EMPTY: WORD_EMPTY_ID})
 print('Dictionary has {} elements'.format(len(dictionary)))
 
 train = []
@@ -162,6 +162,7 @@ def char_emb_ids(word: str, embeddings_count, embedding_length=3):
     n = len(w)
     return [hash(w[i:i + n + 1]) % embeddings_count for i in range(n - embedding_length + 1)]
 
+
 SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
 
@@ -170,7 +171,7 @@ class TBSyntaxParser(nn.Module):
         super().__init__()
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, HIDDEN_SIZE)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, HIDDEN_SIZE, mode='sum')
-        self.linear = nn.Linear(HIDDEN_SIZE*6, 3)
+        self.linear = nn.Linear(HIDDEN_SIZE * 6, 3)
 
         self.set_device = None
         self.cpu()
@@ -195,8 +196,8 @@ class TBSyntaxParser(nn.Module):
 
     def create_initial_states(self, sentences: List[List[str]], ids: List[List[int]]):
         states = []
-        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY]*3 for sent in sentences]
-        id_sents = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID]*3 for sent in ids]
+        sentences = [[WORD_ROOT] + sent + [WORD_EMPTY] * 3 for sent in sentences]
+        id_sents = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID] * 3 for sent in ids]
 
         char_embs, word_indexes = self._batch_char_emb(sentences)
 
@@ -205,7 +206,6 @@ class TBSyntaxParser(nn.Module):
             chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
             buffer = words_embeddings + chars_embeddings
-
 
             state = SyntaxState(ws[1:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
             states.append(state)
@@ -223,14 +223,14 @@ class TBSyntaxParser(nn.Module):
                                  s.buffer)
             else:
                 if a == 1:  # right-arc
-                    assert len(s.stack) > 4
-                    child = s.stack[-2]
-                    head = s.stack[-1]
-
-                elif a == 2:  # left-arc
                     assert len(s.stack) > 3
                     child = s.stack[-1]
                     head = s.stack[-2]
+
+                elif a == 2:  # left-arc
+                    assert len(s.stack) > 4
+                    child = s.stack[-2]
+                    head = s.stack[-1]
 
                 else:
                     raise RuntimeError('Unknown action index')
@@ -273,6 +273,34 @@ class TBSyntaxParser(nn.Module):
         return res.exp() * self.set_device(Variable(torch.FloatTensor(legal_actions)))
 
 
+def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
+    rword = stack[-1]
+    lword = stack[-2]
+
+    if len(stack) < 2:
+        return [0, 100, 100]
+    else:
+        r_err = len([w for w in chain(stack, buffer) if heads[w] == rword])
+        if heads[rword] != lword and heads[rword] in chain(stack, buffer):
+            r_err += 1
+
+    if len(stack) < 3:
+        l_err = 100
+    else:
+        l_err = len([w for w in chain(stack, buffer) if heads[w] == lword])
+        if heads[lword] != rword and heads[lword] in chain(stack, buffer):
+            l_err += 1
+
+    if not buffer:
+        s_err = 100
+    elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads[w] == buffer[0]]:
+        s_err = 0
+    else:
+        s_err = min(get_errors(stack + [buffer[0]], buffer[1:], heads))
+
+    return [s_err, r_err, l_err]
+
+
 parser = TBSyntaxParser()
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
@@ -313,7 +341,9 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     while states:
         decisions = parser.forward(states)
         decisions /= decisions.sum(1, keepdim=True)
+
         ys = [s.pop(0) for s in batch_ga]
+
         loss += criterion(decisions, parser.set_device(Variable(torch.LongTensor(ys)))) * len(states)
         total_actions += len(states)
 
@@ -331,7 +361,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
                 assert terminated[i]
                 total_heads += len(heads[i])
                 for w in range(len(heads[i])):
-                    if states[i].arcs[w+1] == heads[i][w]:
+                    if states[i].arcs[w + 1] == heads[i][w]:
                         correct_heads += 1
                 states.pop(i)
                 batch_ga.pop(i)
@@ -351,7 +381,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     print('{:.2f}'.format(seen_samples).ljust(8),
           '{:.1f}%'.format(correct_actions / total_actions * 100),
           np.mean(losses[-10:]),
-          '{:.3f}s'.format(sum(times)/len(times)),
+          '{:.3f}s'.format(sum(times) / len(times)),
           sep='\t')
 
     if (seen_samples // BATCH_SIZE) % (TEST_EVERY_SAMPLES // BATCH_SIZE) == 0:
@@ -364,7 +394,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         heads = list(heads)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
-
 
         states = parser.create_initial_states(sents, ids)
 
