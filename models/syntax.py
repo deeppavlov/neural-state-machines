@@ -31,6 +31,8 @@ WORD_UNKNOWN_ID = 0
 
 BUCKETS_COUNT = 8
 
+PUNISH = 100
+
 
 def batch_generator(seq: Iterator, batch_size):
     seq = list(seq)
@@ -277,9 +279,8 @@ class TBSyntaxParser(nn.Module):
 
 
 def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
-
     if len(stack) < 2:
-        return [0, 100, 100]
+        return [0, PUNISH, PUNISH]
     rword = stack[-1]
     lword = stack[-2]
 
@@ -288,14 +289,14 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
         r_err += 1
 
     if len(stack) < 3:
-        l_err = 100
+        l_err = PUNISH
     else:
         l_err = len([w for w in chain(stack, buffer) if heads.get(w, -1) == lword])
         if heads[lword] != rword and heads[lword] in chain(stack, buffer):
             l_err += 1
 
     if not buffer:
-        s_err = 100
+        s_err = PUNISH
     elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
         s_err = 0
     else:
@@ -335,7 +336,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     loss = parser.set_device(Variable(torch.zeros(1)))
 
     ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
-    heads = list(heads)
+    heads = [{i+1: h for i, h in enumerate(head)} for head in heads]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
 
@@ -354,7 +355,10 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
         ys = [s.pop(0) for s in batch_ga]
 
-        # errors = [get_errors(s.stack) for s in states]
+        errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
+
+        for y, e in zip(ys, errors):
+            assert e[y] == 0
 
         loss += criterion(decisions, parser.set_device(Variable(torch.LongTensor(ys)))) * len(states)
         total_actions += len(states)
@@ -373,7 +377,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
                 assert terminated[i]
                 total_heads += len(heads[i])
                 for w in range(len(heads[i])):
-                    if states[i].arcs[w + 1] == heads[i][w]:
+                    if states[i].arcs[w + 1] == heads[i][w+1]:
                         correct_heads += 1
                 states.pop(i)
                 batch_ga.pop(i)
