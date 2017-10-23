@@ -31,7 +31,7 @@ WORD_UNKNOWN_ID = 0
 
 BUCKETS_COUNT = 8
 
-PUNISH = 100
+PUNISH = 10
 
 
 def batch_generator(seq: Iterator, batch_size):
@@ -305,12 +305,13 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
     return [s_err, r_err, l_err]
 
 
-assert get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}) == [0, 100, 100]
-assert get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}) == [0, 1, 100]
+assert get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}) == [0, PUNISH, PUNISH]
+assert get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}) == [0, 1, PUNISH]
 assert get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}) == [1, 2, 0]
-assert get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}) == [0, 1, 100]
-assert get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}) == [100, 2, 0]
-assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [100, 0, 100]
+assert get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}) == [0, 1, PUNISH]
+assert get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 2, 0]
+assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 0, PUNISH]
+assert get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}) == [0, 3, 0]
 
 parser = TBSyntaxParser()
 
@@ -319,7 +320,9 @@ if device_id >= 0:
     parser.cuda(device_id)
 
 optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9))
-criterion = nn.CrossEntropyLoss()
+
+criterion = nn.BCELoss(parser.set_device(Variable(torch.FloatTensor([[0.1, 1, 1]]))))
+# criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
 losses = []
@@ -356,11 +359,11 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         ys = [s.pop(0) for s in batch_ga]
 
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
+        # for y, e in zip(ys, errors):
+        #     assert e[y] == 0
+        rights = Variable(parser.set_device((torch.LongTensor(errors) == 0).float()))
 
-        for y, e in zip(ys, errors):
-            assert e[y] == 0
-
-        loss += criterion(decisions, parser.set_device(Variable(torch.LongTensor(ys)))) * len(states)
+        loss += criterion(decisions, rights) * len(states)
         total_actions += len(states)
 
         _, argmax = decisions.max(1)
@@ -369,6 +372,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
         states = parser.act(states, ys)
+        # states = parser.act(states, argmax.data.tolist())
 
         terminated = TBSyntaxParser.terminated(states)
 
@@ -394,8 +398,9 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
     times.append(time() - start)
     # print(example)
-    print('{:.2f}'.format(seen_samples).ljust(8),
+    print('{}'.format(seen_samples).ljust(8),
           '{:.1f}%'.format(correct_actions / total_actions * 100),
+          '{:.1f}%'.format(correct_heads / total_heads * 100),
           np.mean(losses[-10:]),
           '{:.3f}s'.format(sum(times) / len(times)),
           sep='\t')
