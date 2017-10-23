@@ -274,32 +274,39 @@ class TBSyntaxParser(nn.Module):
 
 
 def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
-    rword = stack[-1]
-    lword = stack[-2]
 
     if len(stack) < 2:
         return [0, 100, 100]
-    else:
-        r_err = len([w for w in chain(stack, buffer) if heads[w] == rword])
-        if heads[rword] != lword and heads[rword] in chain(stack, buffer):
-            r_err += 1
+    rword = stack[-1]
+    lword = stack[-2]
+
+    r_err = len([w for w in chain(stack, buffer) if heads.get(w, -1) == rword])
+    if heads[rword] != lword and heads[rword] in chain(stack, buffer):
+        r_err += 1
 
     if len(stack) < 3:
         l_err = 100
     else:
-        l_err = len([w for w in chain(stack, buffer) if heads[w] == lword])
+        l_err = len([w for w in chain(stack, buffer) if heads.get(w, -1) == lword])
         if heads[lword] != rword and heads[lword] in chain(stack, buffer):
             l_err += 1
 
     if not buffer:
         s_err = 100
-    elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads[w] == buffer[0]]:
+    elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
         s_err = 0
     else:
         s_err = min(get_errors(stack + [buffer[0]], buffer[1:], heads))
 
     return [s_err, r_err, l_err]
 
+
+assert get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}) == [0, 100, 100]
+assert get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}) == [0, 1, 100]
+assert get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}) == [1, 2, 0]
+assert get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}) == [0, 1, 100]
+assert get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}) == [100, 2, 0]
+assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [100, 0, 100]
 
 parser = TBSyntaxParser()
 
