@@ -202,12 +202,14 @@ class TBSyntaxParser(nn.Module):
         char_embs, word_indexes = self._batch_char_emb(sentences)
 
         for i, (ws, ids) in enumerate(zip(sentences, id_sents)):
+            word_empty_index = len(ws) - 1
+
             words_embeddings = self.word_emb(self.set_device(Variable(torch.LongTensor(ids))))
             chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
             buffer = words_embeddings + chars_embeddings
 
-            state = SyntaxState(ws[1:-3], 0, {}, [(-1, buffer[-1]), (-1, buffer[-1]), (0, buffer[0])], buffer[1:])
+            state = SyntaxState(ws[1:-3], 1, {}, [word_empty_index, word_empty_index, 0], buffer)
             states.append(state)
         return states
 
@@ -219,7 +221,7 @@ class TBSyntaxParser(nn.Module):
                 ns = SyntaxState(s.words,
                                  s.buffer_index + 1,
                                  s.arcs,
-                                 s.stack + [(s.buffer_index + 1, s.buffer[s.buffer_index])],
+                                 s.stack + [s.buffer_index],
                                  s.buffer)
             else:
                 if a == 1:  # right-arc
@@ -236,7 +238,7 @@ class TBSyntaxParser(nn.Module):
                     raise RuntimeError('Unknown action index')
 
                 new_arcs = dict(s.arcs)
-                new_arcs[child[0]] = head[0]
+                new_arcs[child] = head
 
                 ns = SyntaxState(s.words,
                                  s.buffer_index,
@@ -255,15 +257,16 @@ class TBSyntaxParser(nn.Module):
         buffers = []
         stacks = []
         legal_actions = np.zeros([len(states), 3]) + 1
+        stack_indexes = self.set_device(torch.LongTensor([s.stack[-3:] for s in states]))
         for i, s in enumerate(states):
             buffers.append(s.buffer[s.buffer_index: s.buffer_index + 3].view(-1))
-            stacks.append(torch.cat([st[1] for st in s.stack[-3:]]))
+            stacks.append(s.buffer[stack_indexes[i]].view(-1))
             if s.buffer_index + 3 >= len(s.buffer):
                 legal_actions[i, 0] = 0
             if len(s.stack) <= 4:
-                legal_actions[i, 1] = 0
-            if len(s.stack) <= 3:
                 legal_actions[i, 2] = 0
+            if len(s.stack) <= 3:
+                legal_actions[i, 1] = 0
 
         buffers = torch.stack(buffers)
         stacks = torch.stack(stacks)
@@ -350,6 +353,8 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         decisions /= decisions.sum(1, keepdim=True)
 
         ys = [s.pop(0) for s in batch_ga]
+
+        # errors = [get_errors(s.stack) for s in states]
 
         loss += criterion(decisions, parser.set_device(Variable(torch.LongTensor(ys)))) * len(states)
         total_actions += len(states)
