@@ -334,7 +334,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     seen_samples += len(batch)
 
     batch = list(deepcopy(batch))
-    batch_ga = list(deepcopy(batch_ga))
+    # batch_ga = list(deepcopy(batch_ga))
 
     loss = parser.set_device(Variable(torch.zeros(1)))
 
@@ -356,7 +356,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         decisions = parser.forward(states)
         decisions /= decisions.sum(1, keepdim=True)
 
-        ys = [s.pop(0) for s in batch_ga]
+        # ys = [s.pop(0) for s in batch_ga]
 
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
         # for y, e in zip(ys, errors):
@@ -367,24 +367,23 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         total_actions += len(states)
 
         _, argmax = decisions.max(1)
-        correct_actions += (argmax == parser.set_device(Variable(torch.LongTensor(ys)))).long().sum().data[0]
+        # correct_actions += (argmax == parser.set_device(Variable(torch.LongTensor(ys)))).long().sum().data[0]
 
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
-        states = parser.act(states, ys)
-        # states = parser.act(states, argmax.data.tolist())
+        # states = parser.act(states, ys)
+        states = parser.act(states, argmax.data.tolist())
 
         terminated = TBSyntaxParser.terminated(states)
 
-        for i in reversed(range(len(batch_ga))):
-            if not batch_ga[i]:
-                assert terminated[i]
+        for i in reversed(range(len(states))):
+            if terminated[i]:
                 total_heads += len(heads[i])
                 for w in range(len(heads[i])):
                     if states[i].arcs[w + 1] == heads[i][w+1]:
                         correct_heads += 1
                 states.pop(i)
-                batch_ga.pop(i)
+                # batch_ga.pop(i)
                 heads.pop(i)
 
     assert not states
@@ -399,7 +398,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     times.append(time() - start)
     # print(example)
     print('{}'.format(seen_samples).ljust(8),
-          '{:.1f}%'.format(correct_actions / total_actions * 100),
+          # '{:.1f}%'.format(correct_actions / total_actions * 100),
           '{:.1f}%'.format(correct_heads / total_heads * 100),
           np.mean(losses[-10:]),
           '{:.3f}s'.format(sum(times) / len(times)),
