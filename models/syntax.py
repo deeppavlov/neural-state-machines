@@ -15,7 +15,7 @@ from copy import deepcopy
 
 from data_providers.ud_pos import pos as ud
 
-STOP_AFTER_SAMPLES = 200 * 1000
+STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
@@ -368,7 +368,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     example = []
     while states:
         decisions = parser.forward(states, test_mode=False)
-        decisions /= decisions.sum(1, keepdim=True)
+        decisions /= decisions + 1
 
         # ys = [s.pop(0) for s in batch_ga]
 
