@@ -376,7 +376,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         errors = torch.LongTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
-        rights = Variable(parser.set_device((errors - errors.min() == 0).float()))
+        rights = Variable(parser.set_device((errors - errors.min(1, keepdim=True)[0] == 0).float()))
 
         local_loss = criterion(decisions, rights)
 
