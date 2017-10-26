@@ -140,7 +140,7 @@ for s in conllu.train:
         pass
     except RuntimeError:
         train_gold_errors += 1
-print('Train has {} examples'.format(len(train)))
+print('Train has {} examples after removing {} errors'.format(len(train), train_gold_errors))
 
 test = []
 test_ga = []
@@ -448,7 +448,7 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         example = []
         while states:
             decisions = parser.forward(states)
-            decisions /= decisions.sum(1, keepdim=True)
+            decisions /= decisions + 1
             total_actions += len(states)
 
             _, argmax = decisions.max(1)
