@@ -1,27 +1,26 @@
+import os
 import random
 from collections import namedtuple, defaultdict
+from copy import deepcopy
 from itertools import chain
 from time import time
 from typing import List, Iterator, Dict
+
+import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.autograd import Variable
 from torch.optim import Adam
-import numpy as np
-import os
-
-from copy import deepcopy
 
 # from data_providers.ud_pos import pos as ud
-import data_providers.OntoNotes.ontonotes as onto
+import data_providers.ontonotes as onto
 
 STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
 HIDDEN_SIZE = 50
-LR = 0.001
+LR = 0.0001
 BATCH_SIZE = 256
 
 WORD_ROOT = ' '
@@ -117,7 +116,7 @@ assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_cou
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
 
 conllu = onto.DataProvider(lang='english')
-# conllu = ud.DataProvider(lang='russian')
+# conllu = ud. (lang='russian')
 
 dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
                                reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,

@@ -1,5 +1,6 @@
 import os
 import zipfile
+import git
 
 from data_providers.gikrya.gikrya_parser import read_conllu_file, get_pos_tags
 from utils.data import is_done, download, mark_done
