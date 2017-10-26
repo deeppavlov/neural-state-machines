@@ -13,7 +13,8 @@ import os
 
 from copy import deepcopy
 
-from data_providers.ud_pos import pos as ud
+# from data_providers.ud_pos import pos as ud
+import data_providers.OntoNotes.ontonotes as onto
 
 STOP_AFTER_SAMPLES = 200 * 1000
 TEST_EVERY_SAMPLES = 2000
@@ -115,7 +116,7 @@ def create_dictionary(words, reserved_ids=None, min_count=2):
 assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
 
-conllu = ud.DataProvider(lang='english')
+conllu = onto.DataProvider(lang='english')
 # conllu = ud.DataProvider(lang='russian')
 
 dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
