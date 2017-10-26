@@ -12,7 +12,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 from torch.optim import Adam
 
-# from data_providers.ud_pos import pos as ud
+from data_providers.ud_pos import pos as ud
 import data_providers.ontonotes as onto
 
 STOP_AFTER_SAMPLES = 20000 * 1000
@@ -115,8 +115,9 @@ def create_dictionary(words, reserved_ids=None, min_count=2):
 assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
 
-conllu = onto.DataProvider(lang='english')
-# conllu = ud. (lang='russian')
+# conllu = onto.DataProvider(lang='english')
+conllu = ud. (lang='russian')
+# conllu = ud.DataProvider(lang='russian')
 
 dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
                                reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
@@ -380,10 +381,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
         local_loss = criterion(decisions, rights)
 
-        optimizer.zero_grad()
-        local_loss.backward(retain_graph=bool(states))
-        optimizer.step()
-
         loss += local_loss * len(states)
         total_actions += len(states)
 
@@ -406,6 +403,10 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
                 states.pop(i)
                 # batch_ga.pop(i)
                 heads.pop(i)
+
+        optimizer.zero_grad()
+        local_loss.backward(retain_graph=bool(states))
+        optimizer.step()
 
     assert not states
 
