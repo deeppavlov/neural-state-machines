@@ -43,7 +43,8 @@ with open(CONLL_TRAIN_FILES) as f:
 #     for t in train_files:
 #         print(t, file=f)
 
-Conll = namedtuple('Conll', 'id form lemma cpostag unk head deplabel')
+# Conll = namedtuple('Conll', 'id form lemma cpostag unk head deplabel')
+Conll = namedtuple('Conll', 'id form head')
 
 
 def _read_file(fn):
@@ -52,7 +53,11 @@ def _read_file(fn):
         for line in f:
             line = line.strip()
             if line:
-                w = Conll(*line.split('\t')[:-3])
+                row = line.split('\t')
+                idx = row[0]
+                form = row[1]
+                head = row[5]
+                w = Conll(idx, form, head)
                 words.append(w)
             else:
                 yield words
@@ -66,9 +71,9 @@ def _read_data(lang):
     test = []
     for root, dirs, files in os.walk(os.path.join(LANG_FOLDER, lang)):
         for fn in files:
-            if not fn.endswith('parse.dep'):
+            if not fn.endswith('.parse.dep'):
                 continue
-            if fn in conll_test:
+            if fn[:-len('.parse.dep')] in conll_test:
                 target = test
             else:
                 target = train
