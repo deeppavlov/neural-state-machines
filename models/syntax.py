@@ -16,13 +16,13 @@ from copy import deepcopy
 # from data_providers.ud_pos import pos as ud
 import data_providers.OntoNotes.ontonotes as onto
 
-STOP_AFTER_SAMPLES = 200 * 1000
+STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
 HIDDEN_SIZE = 50
-LR = 0.01
-BATCH_SIZE = 64
+LR = 0.001
+BATCH_SIZE = 256
 
 WORD_ROOT = ' '
 WORD_EMPTY = '\t'
@@ -220,34 +220,44 @@ class TBSyntaxParser(nn.Module):
         new_states = []
         for s, a in zip(states, actions):
             if a == 0:  # shift
-                assert s.buffer_index + 3 < len(s.buffer)
-                ns = SyntaxState(s.words,
-                                 s.buffer_index + 1,
-                                 s.arcs,
-                                 s.stack + [s.buffer_index],
-                                 s.buffer)
+                if s.buffer_index + 3 < len(s.buffer):
+                    ns = SyntaxState(s.words,
+                                     s.buffer_index + 1,
+                                     s.arcs,
+                                     s.stack + [s.buffer_index],
+                                     s.buffer)
+                else:
+                    ns = s
             else:
+                ok = True
                 if a == 1:  # right-arc
-                    assert len(s.stack) > 3
-                    child = s.stack[-1]
-                    head = s.stack[-2]
+                    if len(s.stack) > 3:
+                        child = s.stack[-1]
+                        head = s.stack[-2]
+                    else:
+                        ok = False
 
                 elif a == 2:  # left-arc
-                    assert len(s.stack) > 4
-                    child = s.stack[-2]
-                    head = s.stack[-1]
+                    if len(s.stack) > 4:
+                        child = s.stack[-2]
+                        head = s.stack[-1]
+                    else:
+                        ok = False
 
                 else:
                     raise RuntimeError('Unknown action index')
 
-                new_arcs = dict(s.arcs)
-                new_arcs[child] = head
+                if ok:
+                    new_arcs = dict(s.arcs)
+                    new_arcs[child] = head
 
-                ns = SyntaxState(s.words,
-                                 s.buffer_index,
-                                 new_arcs,
-                                 s.stack[:-2] + [head],
-                                 s.buffer)
+                    ns = SyntaxState(s.words,
+                                     s.buffer_index,
+                                     new_arcs,
+                                     s.stack[:-2] + [head],
+                                     s.buffer)
+                else:
+                    ns = s
 
             new_states.append(ns)
         return new_states
@@ -256,7 +266,7 @@ class TBSyntaxParser(nn.Module):
     def terminated(states):
         return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
 
-    def forward(self, states: List[SyntaxState]):
+    def forward(self, states: List[SyntaxState], test_mode=True):
         buffers = []
         stacks = []
         legal_actions = np.zeros([len(states), 3]) + 1
@@ -274,9 +284,13 @@ class TBSyntaxParser(nn.Module):
         buffers = torch.stack(buffers)
         stacks = torch.stack(stacks)
         X = torch.cat([buffers, stacks], dim=1)
-        res = torch.clamp(self.linear(X), 1e-5, 10)
+        res = self.linear(X)
+        res = torch.clamp(res, -10e5, 10)
         # res -= res.max(1, keepdim=True)[0]
-        return res.exp() * self.set_device(Variable(torch.FloatTensor(legal_actions)))
+        res = res.exp()
+        if test_mode:
+            res = res * self.set_device(Variable(torch.FloatTensor(legal_actions)))
+        return res
 
 
 def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
@@ -322,7 +336,7 @@ if device_id >= 0:
 
 optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9))
 
-criterion = nn.BCELoss(parser.set_device(Variable(torch.FloatTensor([[0.1, 1, 1]]))))
+criterion = nn.BCELoss()
 # criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
@@ -354,17 +368,24 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
 
     example = []
     while states:
-        decisions = parser.forward(states)
-        decisions /= decisions.sum(1, keepdim=True)
+        decisions = parser.forward(states, test_mode=False)
+        decisions /= decisions + 1
 
         # ys = [s.pop(0) for s in batch_ga]
 
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
+        errors = torch.LongTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
-        rights = Variable(parser.set_device((torch.LongTensor(errors) == 0).float()))
+        rights = Variable(parser.set_device((errors - errors.min(1, keepdim=True)[0] == 0).float()))
 
-        loss += criterion(decisions, rights) * len(states)
+        local_loss = criterion(decisions, rights)
+
+        optimizer.zero_grad()
+        local_loss.backward(retain_graph=bool(states))
+        optimizer.step()
+
+        loss += local_loss * len(states)
         total_actions += len(states)
 
         _, argmax = decisions.max(1)
@@ -390,11 +411,11 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
     assert not states
 
     loss = loss / total_actions
-    optimizer.zero_grad()
-    loss.backward()
+    # optimizer.zero_grad()
+    # loss.backward()
     losses.append(loss.data[0])
 
-    optimizer.step()
+    # optimizer.step()
 
     times.append(time() - start)
     # print(example)
