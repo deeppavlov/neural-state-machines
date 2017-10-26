@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.autograd import Variable
 from torch.optim import Adam
+import torch.nn.functional as F
 
 from data_providers.ud_pos import pos as ud
 import data_providers.ontonotes as onto
@@ -19,8 +20,18 @@ STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
-HIDDEN_SIZE = 50
-LR = 0.0001
+HIDDEN_SIZE = 200
+
+WORD_DIM = 20
+CHAR_DIM = 20
+LABEL_DIM = 12
+TAG_DIM = 20
+OUT_DIM = 3
+
+# TOP_FROM_STACK = 3
+# TOP_FROM_BUFFER = 3
+
+LR = 0.001
 BATCH_SIZE = 256
 
 WORD_ROOT = ' '
@@ -28,6 +39,7 @@ WORD_EMPTY = '\t'
 WORD_EMPTY_ID = 2
 WORD_ROOT_ID = 1
 WORD_UNKNOWN_ID = 0
+
 
 BUCKETS_COUNT = 8
 
@@ -115,49 +127,50 @@ def create_dictionary(words, reserved_ids=None, min_count=2):
 assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
 
-conllu = onto.DataProvider(lang='english')
-# conllu = ud.DataProvider(lang='russian')
-# conllu = ud.DataProvider(lang='russian')
 
-dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
-                               reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
-                                             WORD_EMPTY: WORD_EMPTY_ID})
-print('Dictionary has {} elements'.format(len(dictionary)))
+def prepare_data():
+    conllu = onto.DataProvider(lang='english')
+    # conllu = ud.DataProvider(lang='russian')
+    # conllu = ud.DataProvider(lang='russian')
 
-train = []
-train_ga = []
-train_gold_errors = 0
-for s in conllu.train:
-    try:
-        sent = []
-        for w in s:
-            int(w.id)  # crash if not integer
-            sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-        ga = gold_actions([e[2] for e in sent])
-        train.append(sent)
-        train_ga.append(ga)
-    except ValueError:
-        pass
-    except RuntimeError:
-        train_gold_errors += 1
-print('Train has {} examples after removing {} errors'.format(len(train), train_gold_errors))
+    dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
+                                   reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
+                                                 WORD_EMPTY: WORD_EMPTY_ID})
+    print('Dictionary has {} elements'.format(len(dictionary)))
 
-test = []
-test_ga = []
-test_gold_errors = 0
-for s in conllu.dev:
-    try:
-        sent = []
-        for w in s:
-            int(w.id)
-            sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-        ga = gold_actions([e[2] for e in sent])
-        test.append(sent)
-        train_ga.append(ga)
-    except ValueError:
-        pass
-    except RuntimeError:
-        test_gold_errors += 1
+    train = []
+    train_gold_errors = 0
+    for s in conllu.train:
+        try:
+            sent = []
+            for w in s:
+                int(w.id)  # crash if not integer
+                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
+            ga = gold_actions([e[2] for e in sent])
+            train.append(sent)
+        except ValueError:
+            pass
+        except RuntimeError:
+            train_gold_errors += 1
+    print('Train has {} examples after removing {} errors'.format(len(train), train_gold_errors))
+
+    test = []
+    test_gold_errors = 0
+    for s in conllu.dev:
+        try:
+            sent = []
+            for w in s:
+                int(w.id)
+                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
+            ga = gold_actions([e[2] for e in sent])
+            test.append(sent)
+        except ValueError:
+            pass
+        except RuntimeError:
+            test_gold_errors += 1
+    print('Test has {} examples after removing {} errors'.format(len(test), test_gold_errors))
+
+    return train, test, dictionary
 
 
 def char_emb_ids(word: str, embeddings_count, embedding_length=3):
@@ -172,9 +185,10 @@ SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 class TBSyntaxParser(nn.Module):
     def __init__(self):
         super().__init__()
-        self.word_emb = nn.Embedding(WORD_EMB_COUNT, HIDDEN_SIZE)
-        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, HIDDEN_SIZE, mode='sum')
-        self.linear = nn.Linear(HIDDEN_SIZE * 6, 3)
+        self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
+        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
+        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM) * (3+3), HIDDEN_SIZE)
+        self.hidden2output = nn.Linear(HIDDEN_SIZE, OUT_DIM)
 
         self.set_device = None
         self.cpu()
@@ -210,7 +224,7 @@ class TBSyntaxParser(nn.Module):
             words_embeddings = self.word_emb(self.set_device(Variable(torch.LongTensor(ids))))
             chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
-            buffer = words_embeddings + chars_embeddings
+            buffer = torch.cat([words_embeddings, chars_embeddings], dim=1)
 
             state = SyntaxState(ws[1:-3], 1, {}, [word_empty_index, word_empty_index, 0], buffer)
             states.append(state)
@@ -284,9 +298,10 @@ class TBSyntaxParser(nn.Module):
         buffers = torch.stack(buffers)
         stacks = torch.stack(stacks)
         X = torch.cat([buffers, stacks], dim=1)
-        res = self.linear(X)
-        res = torch.clamp(res, -10e5, 10)
-        # res -= res.max(1, keepdim=True)[0]
+        hid = F.relu(self.input2hidden(X))
+        out = self.hidden2output(hid)
+        res = torch.clamp(out, -10e5, 10)
+
         res = res.exp()
         if test_mode:
             res = res * self.set_device(Variable(torch.FloatTensor(legal_actions)))
@@ -328,6 +343,10 @@ assert get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 2, 0]
 assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 0, PUNISH]
 assert get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}) == [0, 3, 0]
 
+
+train, test, dictionary = prepare_data()
+
+
 parser = TBSyntaxParser()
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
@@ -343,13 +362,11 @@ seen_samples = 0
 losses = []
 
 times = []
-for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
+for batch in batch_generator(train, BATCH_SIZE):
     start = time()
-    batch, batch_ga = zip(*batch)
     seen_samples += len(batch)
 
     batch = list(deepcopy(batch))
-    # batch_ga = list(deepcopy(batch_ga))
 
     loss = parser.set_device(Variable(torch.zeros(1)))
 
@@ -430,7 +447,6 @@ for batch in batch_generator(zip(train, train_ga), BATCH_SIZE):
         test_started = time()
 
         batch = list(deepcopy(test))
-        batch_ga = list(deepcopy(test_ga))
 
         ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
