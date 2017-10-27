@@ -67,9 +67,9 @@ def batch_generator(seq: Iterator, batch_size):
 def gold_actions(heads: List[int]):
     """
     >>> gold_actions([3, 3, 0])
-    [0, 0, 0, 1, 1, 2]
+    [0, 0, 0, 2, 2, 1]
     >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
-    [0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 2, 0, 2, 2]
+    [0, 0, 2, 0, 0, 0, 0, 2, 2, 2, 1, 0, 1, 1]
     """
     w2h = {i: h for i, h in zip(range(1, len(heads) + 1), heads)}
     stack = [0, 1]
@@ -200,6 +200,24 @@ def char_emb_ids(word: str, embeddings_count, embedding_length=3):
 SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
 
+def lpad(arr, size, pad_value):
+    """
+    >>> lpad([], 2, -1)
+    [-1, -1]
+    >>> lpad([1, 2], 3, -1)
+    [-1, 1, 2]
+    >>> lpad([1, 2, 3], 2, -1)
+    [2, 3]
+    """
+    assert size > 0
+    given_arr = arr[-size:]
+    to_add = size - len(given_arr)
+    return [pad_value] * to_add + given_arr
+
+
+# lpad([1, 2], 0, -1)
+
+
 class TBSyntaxParser(nn.Module):
     def __init__(self):
         super().__init__()
@@ -298,6 +316,13 @@ class TBSyntaxParser(nn.Module):
     def terminated(states):
         return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
 
+    @staticmethod
+    def _childs(heads: Dict[int, int]):
+        """
+
+        """
+
+
     def forward(self, states: List[SyntaxState], test_mode=True):
         buffers = []
         stacks = []
@@ -326,7 +351,23 @@ class TBSyntaxParser(nn.Module):
         return res
 
 
-def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
+def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int=PUNISH):
+    """
+    >>> get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}, 10)
+    [0, 10, 10]
+    >>> get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}, 10)
+    [0, 1, 10]
+    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
+    [1, 2, 0]
+    >>> get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
+    [0, 1, 10]
+    >>> get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}, 10)
+    [10, 2, 0]
+    >>> get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}, 10)
+    [10, 0, 10]
+    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}, 10)
+    [0, 3, 0]
+    """
     if len(stack) < 2:
         return [0, PUNISH, PUNISH]
     rword = stack[-1]
@@ -353,13 +394,10 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int]):
     return [s_err, r_err, l_err]
 
 
-assert get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}) == [0, PUNISH, PUNISH]
-assert get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}) == [0, 1, PUNISH]
-assert get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}) == [1, 2, 0]
-assert get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}) == [0, 1, PUNISH]
-assert get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 2, 0]
-assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 0, PUNISH]
-assert get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}) == [0, 3, 0]
+
+
+import doctest
+doctest.testmod()
 
 
 train, test, dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
