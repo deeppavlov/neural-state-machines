@@ -18,7 +18,7 @@ from data_providers.ud_pos import pos as ud
 import data_providers.ontonotes as onto
 
 STOP_AFTER_SAMPLES = 20000 * 1000
-TEST_EVERY_SAMPLES = 2000
+TEST_EVERY_SAMPLES = 5000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
 TAG_EMB_COUNT = 100
@@ -335,7 +335,7 @@ class TBSyntaxParser(nn.Module):
 
         """
 
-    def forward(self, states: List[SyntaxState], test_mode=True):
+    def forward(self, states: List[SyntaxState]):
         buffers = []
         stacks = []
         legal_actions = np.zeros([len(states), 3]) + 1
@@ -357,12 +357,10 @@ class TBSyntaxParser(nn.Module):
         out = self.hidden2output(hid)
 
         res = out
-        res = torch.clamp(res, -10e5, 10)
+        # res = torch.clamp(res, -10e5, 10)
 
-        res = res.exp()
-        if test_mode:
-            res = res * self.set_device(Variable(torch.FloatTensor(legal_actions)))
-        return res
+        # res = res.exp()
+        return res, self.set_device(Variable(torch.FloatTensor(legal_actions)))
 
 
 def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int=PUNISH):
@@ -426,7 +424,8 @@ if device_id >= 0:
 
 optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9))
 
-criterion = nn.BCELoss()
+criterion = nn.BCEWithLogitsLoss()
+# criterion = nn.BCELoss()
 # criterion = nn.CrossEntropyLoss()
 
 seen_samples = 0
@@ -457,8 +456,8 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     example = []
     while states:
-        decisions = parser.forward(states, test_mode=False)
-        decisions /= decisions + 1
+        decisions, _ = parser.forward(states)
+        # decisions /= decisions + 1
 
         # ys = [s.pop(0) for s in batch_ga]
 
@@ -536,8 +535,10 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         example = []
         while states:
-            decisions = parser.forward(states)
-            decisions /= decisions + 1
+            decisions, legal_actions = parser.forward(states)
+            decisions -= decisions.min(1, keepdim=True)[0]
+            decisions = decisions * legal_actions
+
             total_actions += len(states)
 
             _, argmax = decisions.max(1)
