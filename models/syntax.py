@@ -164,7 +164,7 @@ def prepare_data(provider='onto', lang='english'):
             for w in s:
                 int(w.id)  # crash if not integer
                 sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-            ga = gold_actions([e[2] for e in sent])
+            gold_actions([e[2] for e in sent])  # try building gold actions or throw error
             train.append(sent)
         except ValueError:
             pass
@@ -180,7 +180,7 @@ def prepare_data(provider='onto', lang='english'):
             for w in s:
                 int(w.id)
                 sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-            ga = gold_actions([e[2] for e in sent])
+            gold_actions([e[2] for e in sent])  # try building gold actions or throw error
             test.append(sent)
         except ValueError:
             pass
