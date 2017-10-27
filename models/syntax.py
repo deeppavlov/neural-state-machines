@@ -368,7 +368,7 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
     [0, 3, 0]
     """
     if len(stack) < 2:
-        return [0, PUNISH, PUNISH]
+        return [0, punishment, punishment]
     rword = stack[-1]
     lword = stack[-2]
 
@@ -377,14 +377,14 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
         r_err += 1
 
     if len(stack) < 3:
-        l_err = PUNISH
+        l_err = punishment
     else:
         l_err = len([w for w in chain(stack, buffer) if heads.get(w, -1) == lword])
         if heads[lword] != rword and heads[lword] in chain(stack, buffer):
             l_err += 1
 
     if not buffer:
-        s_err = PUNISH
+        s_err = punishment
     elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
         s_err = 0
     else:
