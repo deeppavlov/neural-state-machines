@@ -322,7 +322,6 @@ class TBSyntaxParser(nn.Module):
 
         """
 
-
     def forward(self, states: List[SyntaxState], test_mode=True):
         buffers = []
         stacks = []
@@ -394,14 +393,14 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
     return [s_err, r_err, l_err]
 
 
-
+##################################   RUN TEST  ####################################
 
 import doctest
 doctest.testmod()
 
+##################################   TRAINING   ###################################
 
 train, test, dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
-
 
 parser = TBSyntaxParser()
 
