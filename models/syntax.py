@@ -1,5 +1,6 @@
 import os
 import random
+import pickle
 from collections import namedtuple, defaultdict
 from copy import deepcopy
 from itertools import chain
@@ -126,6 +127,18 @@ def create_dictionary(words, reserved_ids=None, min_count=2):
 
 assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_count=2) in [{' ': 0, 'a': 1, 'c': 2},
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
+
+
+def cached(cache_filename, creating_function):
+    if not os.path.isfile(cache_filename):
+        data = creating_function()
+        print('Creating cache file "{}"'.format(cache_filename))
+        with open(cache_filename, 'wb') as f:
+            pickle.dump(data, f)
+
+    print('loading data from "{}"'.format(cache_filename))
+    with open(cache_filename, 'rb') as f:
+        return pickle.load(f)
 
 
 def prepare_data():
@@ -344,7 +357,7 @@ assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 0, PUNISH]
 assert get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}) == [0, 3, 0]
 
 
-train, test, dictionary = prepare_data()
+train, test, dictionary = cached('downloads/ontonotes.pickle', prepare_data)
 
 
 parser = TBSyntaxParser()
