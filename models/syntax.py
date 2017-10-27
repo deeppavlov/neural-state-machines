@@ -432,10 +432,18 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
     if not buffer:
         s_err = punishment
     else:
-        if chain_head(rword, buffer[0], heads) or (heads[rword] == buffer[0] and not [w for w in chain(stack, buffer) if heads.get(w, -1) == rword]):
+        if chain_head(rword, buffer[0], heads):
             s_err = 0
+        elif heads[rword] == buffer[0] and rword not in [heads.get(w, -1) for w in chain(stack, buffer)]:
+            s_err = 0
+        elif heads.get(lword, -1) == rword:
+            s_err = 2
+        elif heads.get(rword, -1) == lword and rword not in [heads.get(w, -1) for w in chain(stack, buffer)]:
+            s_err = 2
+        elif heads[buffer[0]] in stack:
+            s_err = 2
         else:
-            s_err = 1
+            s_err = 0
 
 
     # elif heads[buffer[0]] == rword and not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
@@ -502,7 +510,9 @@ for batch in batch_generator(train, BATCH_SIZE):
         # decisions /= decisions + 1
 
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
-        # ys = [e.index(min(e)) for e in errors]
+        if [e for e in errors if min(e)]:
+            raise RuntimeError('Bugs!!!')
+        ys = [e.index(min(e)) for e in errors]
         errors = torch.LongTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
@@ -518,8 +528,8 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
-        # states = parser.act(states, ys)
-        states = parser.act(states, argmax.data.tolist())
+        states = parser.act(states, ys)
+        # states = parser.act(states, argmax.data.tolist())
 
         terminated = TBSyntaxParser.terminated(states)
 
