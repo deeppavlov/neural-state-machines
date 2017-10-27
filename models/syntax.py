@@ -141,10 +141,15 @@ def cached(cache_filename, creating_function):
         return pickle.load(f)
 
 
-def prepare_data():
-    conllu = onto.DataProvider(lang='english')
-    # conllu = ud.DataProvider(lang='russian')
-    # conllu = ud.DataProvider(lang='russian')
+def prepare_data(provider='onto', lang='english'):
+    providers = {
+        'onto': onto,
+        'ud': ud
+    }
+    if provider not in providers:
+        raise RuntimeError('unknown data provider')
+
+    conllu = providers[provider].DataProvider(lang=lang)
 
     dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
                                    reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
@@ -357,7 +362,7 @@ assert get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}) == [PUNISH, 0, PUNISH]
 assert get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}) == [0, 3, 0]
 
 
-train, test, dictionary = cached('downloads/ontonotes.pickle', prepare_data)
+train, test, dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
 
 
 parser = TBSyntaxParser()
