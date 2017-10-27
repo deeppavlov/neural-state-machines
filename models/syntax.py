@@ -129,8 +129,8 @@ assert create_dictionary('a b c a c c c'.split(), reserved_ids={' ': 0}, min_cou
                                                                                           {' ': 0, 'a': 2, 'c': 1}]
 
 
-def cached(cache_filename, creating_function):
-    if not os.path.isfile(cache_filename):
+def cached(cache_filename, creating_function, rewrite=False):
+    if not os.path.isfile(cache_filename) or rewrite:
         data = creating_function()
         print('Creating cache file "{}"'.format(cache_filename))
         with open(cache_filename, 'wb') as f:
@@ -156,6 +156,11 @@ def prepare_data(provider='onto', lang='english'):
                                                  WORD_EMPTY: WORD_EMPTY_ID})
     print('Dictionary has {} elements'.format(len(dictionary)))
 
+    tags_dictionary = create_dictionary(chain(*([w.postag for w in s] for s in conllu.train)),
+                                        reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
+                                                      WORD_EMPTY: WORD_EMPTY_ID})
+    print('Tags dictionary has {} elements'.format(len(tags_dictionary)))
+
     train = []
     train_gold_errors = 0
     for s in conllu.train:
@@ -163,8 +168,10 @@ def prepare_data(provider='onto', lang='english'):
             sent = []
             for w in s:
                 int(w.id)  # crash if not integer
-                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-            gold_actions([e[2] for e in sent])  # try building gold actions or throw error
+                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form,
+                             tags_dictionary.get(w.postag, WORD_UNKNOWN_ID), w.postag,
+                             int(w.head)))
+            gold_actions([e[-1] for e in sent])  # try building gold actions or throw error
             train.append(sent)
         except ValueError:
             pass
@@ -179,8 +186,10 @@ def prepare_data(provider='onto', lang='english'):
             sent = []
             for w in s:
                 int(w.id)
-                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form, int(w.head)))
-            gold_actions([e[2] for e in sent])  # try building gold actions or throw error
+                sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form,
+                             tags_dictionary.get(w.postag, WORD_UNKNOWN_ID), w.postag,
+                             int(w.head)))
+            gold_actions([e[-1] for e in sent])  # try building gold actions or throw error
             test.append(sent)
         except ValueError:
             pass
@@ -188,7 +197,7 @@ def prepare_data(provider='onto', lang='english'):
             test_gold_errors += 1
     print('Test has {} examples after removing {} errors'.format(len(test), test_gold_errors))
 
-    return train, test, dictionary
+    return train, test, dictionary, tags_dictionary
 
 
 def char_emb_ids(word: str, embeddings_count, embedding_length=3):
@@ -342,7 +351,9 @@ class TBSyntaxParser(nn.Module):
         X = torch.cat([buffers, stacks], dim=1)
         hid = F.relu(self.input2hidden(X))
         out = self.hidden2output(hid)
-        res = torch.clamp(out, -10e5, 10)
+
+        res = out
+        res = torch.clamp(res, -10e5, 10)
 
         res = res.exp()
         if test_mode:
@@ -400,7 +411,7 @@ doctest.testmod()
 
 ##################################   TRAINING   ###################################
 
-train, test, dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
+train, test, dictionary, tags_dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
 
 parser = TBSyntaxParser()
 
@@ -425,7 +436,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     loss = parser.set_device(Variable(torch.zeros(1)))
 
-    ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+    ids, sents, tag_ids, tags, heads = zip(*[list(zip(*sent)) for sent in batch])
     heads = [{i+1: h for i, h in enumerate(head)} for head in heads]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
@@ -503,7 +514,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         batch = list(deepcopy(test))
 
-        ids, sents, heads = zip(*[list(zip(*sent)) for sent in batch])
+        ids, sents, tag_ids, tags, heads = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
