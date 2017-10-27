@@ -411,7 +411,8 @@ doctest.testmod()
 
 ##################################   TRAINING   ###################################
 
-train, test, dictionary, tags_dictionary = cached('downloads/ontonotes.pickle', lambda: prepare_data('onto', 'english'))
+train, test, dictionary, tags_dictionary = cached('downloads/ontonotes_pos.pickle',
+                                                  lambda: prepare_data('onto', 'english'))
 
 parser = TBSyntaxParser()
 
