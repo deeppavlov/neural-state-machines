@@ -381,6 +381,21 @@ class TBSyntaxParser(nn.Module):
         return res, self.set_device(Variable(torch.FloatTensor(legal_actions)))
 
 
+def chain_head(head: int, child: int, heads: Dict[int, int]):
+    """
+    >>> chain_head(0, 2, {1: 2, 2: 3, 3: 0})
+    True
+    >>> chain_head(2, 0, {1: 2, 2: 3, 3: 0})
+    False
+    """
+    curr_child = child
+    while curr_child != -1:
+        if curr_child == head:
+            return True
+        curr_child = heads.get(curr_child, -1)
+    return False
+
+
 def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int=PUNISH):
     """
     >>> get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}, 10)
@@ -416,13 +431,19 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
 
     if not buffer:
         s_err = punishment
-    elif heads[buffer[0]] == rword or not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
-        s_err = 0
     else:
-        s_err = min(get_errors(stack + [buffer[0]], buffer[1:], heads))
+        if chain_head(rword, buffer[0], heads) or (heads[rword] == buffer[0] and not [w for w in chain(stack, buffer) if heads.get(w, -1) == rword]):
+            s_err = 0
+        else:
+            s_err = 1
+
+
+    # elif heads[buffer[0]] == rword and not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
+    #     s_err = 0
+    # else:
+    #     s_err = min(get_errors(stack + [buffer[0]], buffer[1:], heads))
 
     return [s_err, r_err, l_err]
-
 
 ##################################   RUN TEST  ####################################
 
@@ -480,9 +501,8 @@ for batch in batch_generator(train, BATCH_SIZE):
         decisions, _ = parser.forward(states)
         # decisions /= decisions + 1
 
-        # ys = [s.pop(0) for s in batch_ga]
-
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
+        # ys = [e.index(min(e)) for e in errors]
         errors = torch.LongTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
