@@ -21,6 +21,7 @@ STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 2000
 CHAR_EMB_COUNT = 5000
 WORD_EMB_COUNT = 100 * 1000
+TAG_EMB_COUNT = 100
 HIDDEN_SIZE = 200
 
 WORD_DIM = 20
@@ -231,8 +232,9 @@ class TBSyntaxParser(nn.Module):
     def __init__(self):
         super().__init__()
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
+        self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
-        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM) * (3+3), HIDDEN_SIZE)
+        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3+3), HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, OUT_DIM)
 
         self.set_device = None
@@ -256,20 +258,22 @@ class TBSyntaxParser(nn.Module):
                              self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
         return embs, np.cumsum([0] + word_map)
 
-    def create_initial_states(self, sentences: List[List[str]], ids: List[List[int]]):
+    def create_initial_states(self, sentences: List[List[str]], ids: List[List[int]], tag_ids: List[List[int]]):
         states = []
         sentences = [[WORD_ROOT] + sent + [WORD_EMPTY] * 3 for sent in sentences]
         id_sents = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID] * 3 for sent in ids]
+        id_tags = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID] * 3 for sent in tag_ids]
 
         char_embs, word_indexes = self._batch_char_emb(sentences)
 
-        for i, (ws, ids) in enumerate(zip(sentences, id_sents)):
+        for i, (ws, ids, tag_ids) in enumerate(zip(sentences, id_sents, id_tags)):
             word_empty_index = len(ws) - 1
 
             words_embeddings = self.word_emb(self.set_device(Variable(torch.LongTensor(ids))))
             chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
+            tags_embeddigns = self.tag_emb(self.set_device(Variable(torch.LongTensor(tag_ids))))
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
-            buffer = torch.cat([words_embeddings, chars_embeddings], dim=1)
+            buffer = torch.cat([words_embeddings, chars_embeddings, tags_embeddigns], dim=1)
 
             state = SyntaxState(ws[1:-3], 1, {}, [word_empty_index, word_empty_index, 0], buffer)
             states.append(state)
@@ -441,8 +445,9 @@ for batch in batch_generator(train, BATCH_SIZE):
     heads = [{i+1: h for i, h in enumerate(head)} for head in heads]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
+    tag_ids = [list(ws) for ws in tag_ids]
 
-    states = parser.create_initial_states(sents, ids)
+    states = parser.create_initial_states(sents, ids, tag_ids)
 
     correct_actions = 0
     total_actions = 0
@@ -519,8 +524,9 @@ for batch in batch_generator(train, BATCH_SIZE):
         heads = list(heads)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
+        tag_ids = [list(ws) for ws in tag_ids]
 
-        states = parser.create_initial_states(sents, ids)
+        states = parser.create_initial_states(sents, ids, tag_ids)
 
         correct_actions = 0
         total_actions = 0
