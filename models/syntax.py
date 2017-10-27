@@ -8,6 +8,7 @@ from time import time
 from typing import List, Iterator, Dict
 
 import numpy as np
+import sys
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -207,9 +208,6 @@ def char_emb_ids(word: str, embeddings_count, embedding_length=3):
     return [hash(w[i:i + n + 1]) % embeddings_count for i in range(n - embedding_length + 1)]
 
 
-SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
-
-
 def lpad(arr, size, pad_value):
     """
     >>> lpad([], 2, -1)
@@ -225,8 +223,32 @@ def lpad(arr, size, pad_value):
     return [pad_value] * to_add + given_arr
 
 
-# lpad([1, 2], 0, -1)
+def heads_to_childs(heads: Dict[int, int]) -> Dict[int, List[int]]:
+    """
+    >>> heads_to_childs({1:2, 2: 0, 3: 2}) == {2: [1, 3], 0: [2]}
+    True
+    """
+    children = defaultdict(list)
+    for c, h in heads.items():
+        children[h].append(c)
+    return children
 
+
+def feat_children(target_node:int, heads: Dict[int, int], null_value=-1):
+    """
+    >>> feat_children(2, {1:2, 2: 0, 3: 2})
+    [-1, 1, -1, 3]
+    >>> feat_children(3, {1:2, 2: 0, 3: 2})
+    [-1, -1, -1, -1]
+    """
+    children = heads_to_childs(heads)
+    lc1 = sorted([c for c in children[target_node] if c < target_node])[-2:]
+    rc1 = sorted([c for c in children[target_node] if c > target_node])[0:2]
+
+    return lpad(lc1, 2, null_value) + lpad(rc1, 2, null_value)
+
+
+SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
 class TBSyntaxParser(nn.Module):
     def __init__(self):
@@ -234,7 +256,7 @@ class TBSyntaxParser(nn.Module):
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
         self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
-        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3+3), HIDDEN_SIZE)
+        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3+3+4), HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, OUT_DIM)
 
         self.set_device = None
@@ -329,20 +351,18 @@ class TBSyntaxParser(nn.Module):
     def terminated(states):
         return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
 
-    @staticmethod
-    def _childs(heads: Dict[int, int]):
-        """
-
-        """
-
-    def forward(self, states: List[SyntaxState]):
-        buffers = []
-        stacks = []
+    def forward(self, states: List[SyntaxState], test_mode=True):
         legal_actions = np.zeros([len(states), 3]) + 1
-        stack_indexes = self.set_device(torch.LongTensor([s.stack[-3:] for s in states]))
+
+        stack_indexes = torch.LongTensor([s.stack[-3:] for s in states])
+        buffer_indexes = torch.stack([torch.arange(s.buffer_index, s.buffer_index + 3) for s in states]).long()
+        children_indexes = torch.LongTensor([feat_children(s.buffer_index, s.arcs, len(s.buffer)-1) for s in states])
+        indexes = self.set_device(torch.cat([stack_indexes, buffer_indexes, children_indexes], dim=1))
+
+        X = []
         for i, s in enumerate(states):
-            buffers.append(s.buffer[s.buffer_index: s.buffer_index + 3].view(-1))
-            stacks.append(s.buffer[stack_indexes[i]].view(-1))
+            X.append(s.buffer[indexes[i]].view(-1))
+
             if s.buffer_index + 3 >= len(s.buffer):
                 legal_actions[i, 0] = 0
             if len(s.stack) <= 4:
@@ -350,9 +370,7 @@ class TBSyntaxParser(nn.Module):
             if len(s.stack) <= 3:
                 legal_actions[i, 1] = 0
 
-        buffers = torch.stack(buffers)
-        stacks = torch.stack(stacks)
-        X = torch.cat([buffers, stacks], dim=1)
+        X = torch.stack(X)
         hid = F.relu(self.input2hidden(X))
         out = self.hidden2output(hid)
 
@@ -410,6 +428,9 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
 
 import doctest
 doctest.testmod()
+
+# print('EARLY EXIT', file=sys.stderr)
+# sys.exit()
 
 ##################################   TRAINING   ###################################
 
