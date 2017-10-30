@@ -34,7 +34,7 @@ OUT_DIM = 3
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
 
-LR = 0.001
+LR = 0.02
 BATCH_SIZE = 256
 
 WORD_ROOT = ' '
@@ -403,7 +403,7 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
     >>> get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}, 10)
     [0, 1, 10]
     >>> get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
-    [1, 2, 0]
+    [2, 2, 0]
     >>> get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
     [0, 1, 10]
     >>> get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}, 10)
@@ -506,13 +506,13 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     example = []
     while states:
-        decisions, _ = parser.forward(states)
+        decisions, legal_actions = parser.forward(states)
         # decisions /= decisions + 1
 
         errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
-        if [e for e in errors if min(e)]:
-            raise RuntimeError('Bugs!!!')
-        ys = [e.index(min(e)) for e in errors]
+        # if [e for e in errors if min(e)]:
+        #     raise RuntimeError('Bugs!!!')
+        # ys = [e.index(min(e)) for e in errors]
         errors = torch.LongTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
@@ -523,13 +523,14 @@ for batch in batch_generator(train, BATCH_SIZE):
         loss += local_loss * len(states)
         total_actions += len(states)
 
-        _, argmax = decisions.max(1)
+        _, argmax = ((decisions - decisions.min(1, keepdim=True)[0] + 1) * legal_actions).max(1)
+
         # correct_actions += (argmax == parser.set_device(Variable(torch.LongTensor(ys)))).long().sum().data[0]
 
         # example.append((states[0].words[states[0].index], ys[0], argmax.data[0]))
 
-        states = parser.act(states, ys)
-        # states = parser.act(states, argmax.data.tolist())
+        # states = parser.act(states, ys)
+        states = parser.act(states, argmax.data.tolist())
 
         terminated = TBSyntaxParser.terminated(states)
 
@@ -587,7 +588,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         example = []
         while states:
             decisions, legal_actions = parser.forward(states)
-            decisions -= decisions.min(1, keepdim=True)[0]
+            decisions -= decisions.min(1, keepdim=True)[0] - 1
             decisions = decisions * legal_actions
 
             total_actions += len(states)
