@@ -543,18 +543,18 @@ for batch in batch_generator(train, BATCH_SIZE):
                 # batch_ga.pop(i)
                 heads.pop(i)
 
-        optimizer.zero_grad()
-        local_loss.backward(retain_graph=bool(states))
-        optimizer.step()
+        # optimizer.zero_grad()
+        # local_loss.backward(retain_graph=bool(states))
+        # optimizer.step()
 
     assert not states
 
     loss = loss / total_actions
-    # optimizer.zero_grad()
-    # loss.backward()
+    optimizer.zero_grad()
+    loss.backward()
     losses.append(loss.data[0])
 
-    # optimizer.step()
+    optimizer.step()
 
     times.append(time() - start)
     # print(example)
