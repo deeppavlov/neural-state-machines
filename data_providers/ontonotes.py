@@ -28,7 +28,7 @@ def _get_test_files_list():
     #
 
 
-Conll = namedtuple('Conll', 'id form head postag')
+Conll = namedtuple('Conll', 'id form head deprel postag')
 
 
 import os
@@ -111,7 +111,8 @@ def _read_file(fn):
                 form = row[1]
                 postag = row[3]
                 head = row[5]
-                w = Conll(idx, form, head, postag)
+                deprel = row[6]
+                w = Conll(idx, form, head, deprel, postag)
                 words.append(w)
             else:
                 yield words

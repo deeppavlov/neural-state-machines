@@ -43,7 +43,6 @@ WORD_EMPTY_ID = 2
 WORD_ROOT_ID = 1
 WORD_UNKNOWN_ID = 0
 
-
 BUCKETS_COUNT = 8
 
 PUNISH = 10
@@ -64,43 +63,6 @@ def batch_generator(seq: Iterator, batch_size):
 
         for i in range(0, len(buckets), batch_size):
             yield buckets[i:i + batch_size]
-
-
-def gold_actions(heads: List[int]):
-    """
-    >>> gold_actions([3, 3, 0])
-    [0, 0, 0, 2, 2, 1]
-    >>> gold_actions([2, 0, 6, 6, 6, 2, 2])
-    [0, 0, 2, 0, 0, 0, 0, 2, 2, 2, 1, 0, 1, 1]
-    """
-    w2h = {i: h for i, h in zip(range(1, len(heads) + 1), heads)}
-    stack = [0, 1]
-    buffer = list(range(2, len(heads) + 1))
-    actions = [0]
-
-    while buffer or len(stack) > 1:
-        if len(stack) < 2:
-            # shift
-            actions.append(0)
-            stack.append(buffer.pop(0))
-        elif (stack[-1] not in w2h.values()) and w2h[stack[-1]] == stack[-2]:
-            # right-arc
-            actions.append(1)
-            del w2h[stack[-1]]
-            stack.pop(-1)
-        elif (stack[-2] not in w2h.values()) and w2h[stack[-2]] == stack[-1]:
-            # left-arc
-            actions.append(2)
-            del w2h[stack[-2]]
-            stack.pop(-2)
-        else:
-            if not buffer:
-                raise RuntimeError('Wrong sentence markup')
-            # shift
-            actions.append(0)
-            stack.append(buffer.pop(0))
-
-    return actions
 
 
 def create_dictionary(words, reserved_ids=None, min_count=2):
@@ -160,8 +122,14 @@ def prepare_data(provider='onto', lang='english'):
 
     tags_dictionary = create_dictionary(chain(*([w.postag for w in s] for s in conllu.train)),
                                         reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
-                                                      WORD_EMPTY: WORD_EMPTY_ID})
+                                                      WORD_EMPTY: WORD_EMPTY_ID},
+                                        min_count=1)
     print('Tags dictionary has {} elements'.format(len(tags_dictionary)))
+
+    deprel_dictionary = create_dictionary(chain(*([w.deprel for w in s] for s in conllu.train)),
+                                          reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID},
+                                          min_count=1)
+    print('Head labels dictionary has {} elements'.format(len(deprel_dictionary)))
 
     train = []
     train_gold_errors = 0
@@ -171,15 +139,12 @@ def prepare_data(provider='onto', lang='english'):
             for w in s:
                 int(w.id)  # crash if not integer
                 sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form,
-                             tags_dictionary.get(w.postag, WORD_UNKNOWN_ID), w.postag,
-                             int(w.head)))
-            gold_actions([e[-1] for e in sent])  # try building gold actions or throw error
+                             tags_dictionary[w.postag], w.postag,
+                             int(w.head), deprel_dictionary[w.deprel]))
             train.append(sent)
         except ValueError:
-            pass
-        except RuntimeError:
             train_gold_errors += 1
-    print('Train has {} examples after removing {} errors'.format(len(train), train_gold_errors))
+    print('Train has {} examples after removing {} decimal errors'.format(len(train), train_gold_errors))
 
     test = []
     test_gold_errors = 0
@@ -190,16 +155,13 @@ def prepare_data(provider='onto', lang='english'):
                 int(w.id)
                 sent.append((dictionary.get(w.form, WORD_UNKNOWN_ID), w.form,
                              tags_dictionary.get(w.postag, WORD_UNKNOWN_ID), w.postag,
-                             int(w.head)))
-            gold_actions([e[-1] for e in sent])  # try building gold actions or throw error
+                             int(w.head), deprel_dictionary[w.deprel]))
             test.append(sent)
         except ValueError:
-            pass
-        except RuntimeError:
             test_gold_errors += 1
-    print('Test has {} examples after removing {} errors'.format(len(test), test_gold_errors))
+    print('Test has {} examples after removing {} decimal errors'.format(len(test), test_gold_errors))
 
-    return train, test, dictionary, tags_dictionary
+    return train, test, dictionary, tags_dictionary, deprel_dictionary
 
 
 def char_emb_ids(word: str, embeddings_count, embedding_length=3):
@@ -234,7 +196,7 @@ def heads_to_childs(heads: Dict[int, int]) -> Dict[int, List[int]]:
     return children
 
 
-def feat_children(target_node:int, heads: Dict[int, int], null_value=-1):
+def feat_children(target_node: int, heads: Dict[int, int], null_value=-1):
     """
     >>> feat_children(2, {1:2, 2: 0, 3: 2})
     [-1, 1, -1, 3]
@@ -250,13 +212,14 @@ def feat_children(target_node:int, heads: Dict[int, int], null_value=-1):
 
 SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
 
+
 class TBSyntaxParser(nn.Module):
     def __init__(self):
         super().__init__()
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
         self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
-        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3+3+4), HIDDEN_SIZE)
+        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4), HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, OUT_DIM)
 
         self.set_device = None
@@ -356,7 +319,7 @@ class TBSyntaxParser(nn.Module):
 
         stack_indexes = torch.LongTensor([s.stack[-3:] for s in states])
         buffer_indexes = torch.stack([torch.arange(s.buffer_index, s.buffer_index + 3) for s in states]).long()
-        children_indexes = torch.LongTensor([feat_children(s.buffer_index, s.arcs, len(s.buffer)-1) for s in states])
+        children_indexes = torch.LongTensor([feat_children(s.buffer_index, s.arcs, len(s.buffer) - 1) for s in states])
         indexes = self.set_device(torch.cat([stack_indexes, buffer_indexes, children_indexes], dim=1))
 
         X = []
@@ -396,7 +359,7 @@ def chain_head(head: int, child: int, heads: Dict[int, int]):
     return False
 
 
-def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int=PUNISH):
+def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int = PUNISH):
     """
     >>> get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}, 10)
     [0, 10, 10]
@@ -445,7 +408,6 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
         else:
             s_err = 0
 
-
     # elif heads[buffer[0]] == rword and not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
     #     s_err = 0
     # else:
@@ -453,9 +415,11 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
 
     return [s_err, r_err, l_err]
 
+
 ##################################   RUN TEST  ####################################
 
 import doctest
+
 doctest.testmod()
 
 # print('EARLY EXIT', file=sys.stderr)
@@ -463,8 +427,8 @@ doctest.testmod()
 
 ##################################   TRAINING   ###################################
 
-train, test, dictionary, tags_dictionary = cached('downloads/ontonotes_pos.pickle',
-                                                  lambda: prepare_data('onto', 'english'))
+train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ontonotes_pos_deprel.pickle',
+                                                                     lambda: prepare_data('onto', 'english'))
 
 parser = TBSyntaxParser()
 
@@ -490,8 +454,8 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     loss = parser.set_device(Variable(torch.zeros(1)))
 
-    ids, sents, tag_ids, tags, heads = zip(*[list(zip(*sent)) for sent in batch])
-    heads = [{i+1: h for i, h in enumerate(head)} for head in heads]
+    ids, sents, tag_ids, tags, heads, deprels = zip(*[list(zip(*sent)) for sent in batch])
+    heads = [{i + 1: h for i, h in enumerate(head)} for head in heads]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
     tag_ids = [list(ws) for ws in tag_ids]
@@ -509,7 +473,8 @@ for batch in batch_generator(train, BATCH_SIZE):
         decisions, legal_actions = parser.forward(states)
         # decisions /= decisions + 1
 
-        errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in zip(states, heads)]
+        errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in
+                  zip(states, heads)]
         # if [e for e in errors if min(e)]:
         #     raise RuntimeError('Bugs!!!')
         # ys = [e.index(min(e)) for e in errors]
@@ -538,15 +503,15 @@ for batch in batch_generator(train, BATCH_SIZE):
             if terminated[i]:
                 total_heads += len(heads[i])
                 for w in range(len(heads[i])):
-                    if states[i].arcs[w + 1] == heads[i][w+1]:
+                    if states[i].arcs[w + 1] == heads[i][w + 1]:
                         correct_heads += 1
                 states.pop(i)
                 # batch_ga.pop(i)
                 heads.pop(i)
 
-        # optimizer.zero_grad()
-        # local_loss.backward(retain_graph=bool(states))
-        # optimizer.step()
+                # optimizer.zero_grad()
+                # local_loss.backward(retain_graph=bool(states))
+                # optimizer.step()
 
     assert not states
 
@@ -571,7 +536,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         batch = list(deepcopy(test))
 
-        ids, sents, tag_ids, tags, heads = zip(*[list(zip(*sent)) for sent in batch])
+        ids, sents, tag_ids, tags, heads, deprels = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
