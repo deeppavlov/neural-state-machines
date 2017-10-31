@@ -34,7 +34,7 @@ OUT_DIM = 3
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
 
-LR = 0.02
+LR = 0.005
 BATCH_SIZE = 256
 
 WORD_ROOT = ' '
@@ -422,8 +422,8 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
 
 
 def get_labels_errors(stack: List[int], errors: List[int], labels: Dict[int, int], labels_count: int):
-    r_errors = [errors[1] + (1 if labels.get(stack[-1], -1) != l else 0) for l in range(labels_count)]
-    l_errors = [errors[2] + (1 if labels.get(stack[-2], -1) != l else 0) for l in range(labels_count)]
+    r_errors = [errors[1] + (0.5 if labels.get(stack[-1], -1) != l else 0) for l in range(labels_count)]
+    l_errors = [errors[2] + (0.5 if labels.get(stack[-2], -1) != l else 0) for l in range(labels_count)]
 
     return [errors[0]] + r_errors + l_errors
 
@@ -496,7 +496,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         # if [e for e in errors if min(e)]:
         #     raise RuntimeError('Bugs!!!')
         # ys = [e.index(min(e)) for e in errors]
-        errors = torch.LongTensor(errors)
+        errors = torch.FloatTensor(errors)
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
         rights = Variable(parser.set_device((errors - errors.min(1, keepdim=True)[0] == 0).float()))
