@@ -21,7 +21,6 @@ import data_providers.ontonotes as onto
 STOP_AFTER_SAMPLES = 20000 * 1000
 TEST_EVERY_SAMPLES = 5000
 CHAR_EMB_COUNT = 5000
-WORD_EMB_COUNT = 100 * 1000
 TAG_EMB_COUNT = 100
 HIDDEN_SIZE = 200
 
@@ -30,6 +29,7 @@ CHAR_DIM = 20
 LABEL_DIM = 12
 TAG_DIM = 20
 OUT_DIM = 3
+INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4)
 
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
@@ -216,13 +216,21 @@ SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs arc_labels stac
 
 
 class TBSyntaxParser(nn.Module):
-    def __init__(self, dependency_relations_count):
+    def __init__(self, words_count, dependency_relations_count):
         super().__init__()
         self.dependency_relations_count = dependency_relations_count
-        self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
+        self.words_count = words_count
+
+        self.word_emb = nn.Embedding(words_count, WORD_DIM)
+        self.word_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
+
         self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
+        self.tag_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
+
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
-        self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4), HIDDEN_SIZE)
+        self.char_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
+
+        self.input2hidden = nn.Linear(INPUT_DIM, HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, 1 + 2 * self.dependency_relations_count)
 
         self.set_device = None
@@ -443,7 +451,7 @@ doctest.testmod()
 train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ontonotes_pos_deprel.pickle',
                                                                      lambda: prepare_data('onto', 'english'))
 
-parser = TBSyntaxParser(len(deprel_dictionary))
+parser = TBSyntaxParser(len(dictionary), len(deprel_dictionary))
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
