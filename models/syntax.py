@@ -46,6 +46,7 @@ WORD_UNKNOWN_ID = 0
 BUCKETS_COUNT = 8
 
 PUNISH = 10
+SHIFT_BASIC_ERROR = 3
 
 
 def batch_generator(seq: Iterator, batch_size):
@@ -210,17 +211,18 @@ def feat_children(target_node: int, heads: Dict[int, int], null_value=-1):
     return lpad(lc1, 2, null_value) + lpad(rc1, 2, null_value)
 
 
-SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs stack buffer')
+SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs arc_labels stack buffer')
 
 
 class TBSyntaxParser(nn.Module):
-    def __init__(self):
+    def __init__(self, dependency_relations_count):
         super().__init__()
+        self.dependency_relations_count = dependency_relations_count
         self.word_emb = nn.Embedding(WORD_EMB_COUNT, WORD_DIM)
         self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
         self.input2hidden = nn.Linear((WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4), HIDDEN_SIZE)
-        self.hidden2output = nn.Linear(HIDDEN_SIZE, OUT_DIM)
+        self.hidden2output = nn.Linear(HIDDEN_SIZE, 1 + 2 * self.dependency_relations_count)
 
         self.set_device = None
         self.cpu()
@@ -260,32 +262,35 @@ class TBSyntaxParser(nn.Module):
             # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
             buffer = torch.cat([words_embeddings, chars_embeddings, tags_embeddigns], dim=1)
 
-            state = SyntaxState(ws[1:-3], 1, {}, [word_empty_index, word_empty_index, 0], buffer)
+            state = SyntaxState(ws[1:-3], 1, {}, {}, [word_empty_index, word_empty_index, 0], buffer)
             states.append(state)
         return states
 
     def act(self, states, actions):
         new_states = []
         for s, a in zip(states, actions):
-            if a == 0:  # shift
+            action_id = 0 if a == 0 else (a - 1) // self.dependency_relations_count + 1
+            dep_id = None if a == 0 else (a - 1) % self.dependency_relations_count
+            if action_id == 0:  # shift
                 if s.buffer_index + 3 < len(s.buffer):
                     ns = SyntaxState(s.words,
                                      s.buffer_index + 1,
                                      s.arcs,
+                                     s.arc_labels,
                                      s.stack + [s.buffer_index],
                                      s.buffer)
                 else:
                     ns = s
             else:
                 ok = True
-                if a == 1:  # right-arc
+                if action_id == 1:  # right-arc
                     if len(s.stack) > 3:
                         child = s.stack[-1]
                         head = s.stack[-2]
                     else:
                         ok = False
 
-                elif a == 2:  # left-arc
+                elif action_id == 2:  # left-arc
                     if len(s.stack) > 4:
                         child = s.stack[-2]
                         head = s.stack[-1]
@@ -299,9 +304,13 @@ class TBSyntaxParser(nn.Module):
                     new_arcs = dict(s.arcs)
                     new_arcs[child] = head
 
+                    new_arc_labels = dict(s.arc_labels)
+                    new_arc_labels[child] = dep_id
+
                     ns = SyntaxState(s.words,
                                      s.buffer_index,
                                      new_arcs,
+                                     new_arc_labels,
                                      s.stack[:-2] + [head],
                                      s.buffer)
                 else:
@@ -315,7 +324,7 @@ class TBSyntaxParser(nn.Module):
         return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
 
     def forward(self, states: List[SyntaxState], test_mode=True):
-        legal_actions = np.zeros([len(states), 3]) + 1
+        legal_actions = np.zeros([len(states), 1 + self.dependency_relations_count * 2]) + 1
 
         stack_indexes = torch.LongTensor([s.stack[-3:] for s in states])
         buffer_indexes = torch.stack([torch.arange(s.buffer_index, s.buffer_index + 3) for s in states]).long()
@@ -328,10 +337,10 @@ class TBSyntaxParser(nn.Module):
 
             if s.buffer_index + 3 >= len(s.buffer):
                 legal_actions[i, 0] = 0
-            if len(s.stack) <= 4:
-                legal_actions[i, 2] = 0
             if len(s.stack) <= 3:
-                legal_actions[i, 1] = 0
+                legal_actions[i, 1:self.dependency_relations_count + 1] = 0
+            if len(s.stack) <= 4:
+                legal_actions[i, self.dependency_relations_count + 1:] = 0
 
         X = torch.stack(X)
         hid = F.relu(self.input2hidden(X))
@@ -359,21 +368,22 @@ def chain_head(head: int, child: int, heads: Dict[int, int]):
     return False
 
 
-def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int = PUNISH):
+def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punishment: int = PUNISH,
+               shift_basic_error=SHIFT_BASIC_ERROR):
     """
-    >>> get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}, 10)
+    >>> get_errors([0], [1, 2, 3], {1: 2, 2: 3, 3: 0}, 10, 11)
     [0, 10, 10]
-    >>> get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}, 10)
+    >>> get_errors([0, 1], [2, 3], {1: 2, 2: 3, 3: 0}, 10, 11)
     [0, 1, 10]
-    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
-    [2, 2, 0]
-    >>> get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}, 10)
+    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 3, 3: 0}, 10, 11)
+    [11, 2, 0]
+    >>> get_errors([0, 2], [3], {1: 2, 2: 3, 3: 0}, 10, 11)
     [0, 1, 10]
-    >>> get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}, 10)
+    >>> get_errors([0, 2, 3], [], {1: 2, 2: 3, 3: 0}, 10, 11)
     [10, 2, 0]
-    >>> get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}, 10)
+    >>> get_errors([0, 3], [], {1: 2, 2: 3, 3: 0}, 10, 11)
     [10, 0, 10]
-    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}, 10)
+    >>> get_errors([0, 1, 2], [3], {1: 2, 2: 0, 3: 2}, 10, 11)
     [0, 3, 0]
     """
     if len(stack) < 2:
@@ -400,20 +410,22 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
         elif heads[rword] == buffer[0] and rword not in [heads.get(w, -1) for w in chain(stack, buffer)]:
             s_err = 0
         elif heads.get(lword, -1) == rword:
-            s_err = 2
+            s_err = shift_basic_error
         elif heads.get(rword, -1) == lword and rword not in [heads.get(w, -1) for w in chain(stack, buffer)]:
-            s_err = 2
+            s_err = shift_basic_error
         elif heads[buffer[0]] in stack:
-            s_err = 2
+            s_err = shift_basic_error
         else:
             s_err = 0
 
-    # elif heads[buffer[0]] == rword and not [w for w in chain(stack, buffer) if heads.get(w, -1) == buffer[0]]:
-    #     s_err = 0
-    # else:
-    #     s_err = min(get_errors(stack + [buffer[0]], buffer[1:], heads))
-
     return [s_err, r_err, l_err]
+
+
+def get_labels_errors(stack: List[int], errors: List[int], labels: Dict[int, int], labels_count: int):
+    r_errors = [errors[1] + (1 if labels.get(stack[-1], -1) != l else 0) for l in range(labels_count)]
+    l_errors = [errors[2] + (1 if labels.get(stack[-2], -1) != l else 0) for l in range(labels_count)]
+
+    return [errors[0]] + r_errors + l_errors
 
 
 ##################################   RUN TEST  ####################################
@@ -423,14 +435,14 @@ import doctest
 doctest.testmod()
 
 # print('EARLY EXIT', file=sys.stderr)
-# sys.exit()
+# sys.exit().get(stack[-2], -1)
 
 ##################################   TRAINING   ###################################
 
 train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ontonotes_pos_deprel.pickle',
                                                                      lambda: prepare_data('onto', 'english'))
 
-parser = TBSyntaxParser()
+parser = TBSyntaxParser(len(deprel_dictionary))
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
@@ -456,6 +468,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     ids, sents, tag_ids, tags, heads, deprels = zip(*[list(zip(*sent)) for sent in batch])
     heads = [{i + 1: h for i, h in enumerate(head)} for head in heads]
+    deprels = [{i + 1: r for i, r in enumerate(rel)} for rel in deprels]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
     tag_ids = [list(ws) for ws in tag_ids]
@@ -466,6 +479,7 @@ for batch in batch_generator(train, BATCH_SIZE):
     total_actions = 0
 
     correct_heads = 0
+    correct_rels = 0
     total_heads = 0
 
     example = []
@@ -473,8 +487,12 @@ for batch in batch_generator(train, BATCH_SIZE):
         decisions, legal_actions = parser.forward(states)
         # decisions /= decisions + 1
 
-        errors = [get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h) for s, h in
-                  zip(states, heads)]
+        errors = [get_labels_errors(s.stack,
+                                    get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h),
+                                    labels=r,
+                                    labels_count=parser.dependency_relations_count
+                                    ) for s, h, r in
+                  zip(states, heads, deprels)]
         # if [e for e in errors if min(e)]:
         #     raise RuntimeError('Bugs!!!')
         # ys = [e.index(min(e)) for e in errors]
@@ -482,6 +500,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         # for y, e in zip(ys, errors):
         #     assert e[y] == 0
         rights = Variable(parser.set_device((errors - errors.min(1, keepdim=True)[0] == 0).float()))
+
 
         local_loss = criterion(decisions, rights)
 
@@ -505,9 +524,12 @@ for batch in batch_generator(train, BATCH_SIZE):
                 for w in range(len(heads[i])):
                     if states[i].arcs[w + 1] == heads[i][w + 1]:
                         correct_heads += 1
+                        if states[i].arc_labels[w + 1] == deprels[i][w + 1]:
+                            correct_rels += 1
                 states.pop(i)
                 # batch_ga.pop(i)
                 heads.pop(i)
+                deprels.pop(i)
 
                 # optimizer.zero_grad()
                 # local_loss.backward(retain_graph=bool(states))
@@ -527,6 +549,7 @@ for batch in batch_generator(train, BATCH_SIZE):
     print('{}'.format(seen_samples).ljust(8),
           # '{:.1f}%'.format(correct_actions / total_actions * 100),
           '{:.1f}%'.format(correct_heads / total_heads * 100),
+          '{:.1f}%'.format(correct_rels / total_heads * 100),
           np.mean(losses[-10:]),
           '{:.3f}s'.format(sum(times) / len(times)),
           sep='\t')
@@ -538,6 +561,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         ids, sents, tag_ids, tags, heads, deprels = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
+        deprels = list(deprels)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
         tag_ids = [list(ws) for ws in tag_ids]
@@ -548,6 +572,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         total_actions = 0
 
         correct_heads = 0
+        correct_rels = 0
         total_heads = 0
 
         example = []
@@ -569,8 +594,11 @@ for batch in batch_generator(train, BATCH_SIZE):
                     for w in range(len(heads[i])):
                         if states[i].arcs[w + 1] == heads[i][w]:
                             correct_heads += 1
+                            if states[i].arc_labels[w + 1] == deprels[i][w]:
+                                correct_rels += 1
                     states.pop(i)
                     heads.pop(i)
+                    deprels.pop(i)
 
         assert not states
 
@@ -579,6 +607,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         token_per_sec = test_total_tokens_count / test_duration
         print('TEST', '{}'.format(len(test)).ljust(8),
               '{:.1f}%'.format(correct_heads / total_heads * 100),
+              '{:.1f}%'.format(correct_rels / total_heads * 100),
               '{:.1f} w/s'.format(token_per_sec),
               sep='\t')
 
