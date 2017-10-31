@@ -36,6 +36,7 @@ OUT_DIM = 3
 
 LR = 0.005
 BATCH_SIZE = 256
+L2_DECAY = 1e-6
 
 WORD_ROOT = ' '
 WORD_EMPTY = '\t'
@@ -448,7 +449,7 @@ device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
     parser.cuda(device_id)
 
-optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9))
+optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9), weight_decay=L2_DECAY)
 
 criterion = nn.BCEWithLogitsLoss()
 # criterion = nn.BCELoss()
