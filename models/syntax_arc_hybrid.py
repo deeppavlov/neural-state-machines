@@ -74,16 +74,6 @@ class TBSyntaxParser(nn.Module):
         super().cpu()
         self.set_device = lambda x: x.cpu()
 
-    def _batch_char_emb(self, batch: List[List[str]]):
-        word_map = [len(ws) for ws in batch]
-        batch = list(chain(*[[char_emb_ids(w, CHAR_EMB_COUNT) for w in ws] for ws in batch]))
-        offsets = [len(w) for w in batch]
-        offsets.insert(0, 0)
-        offsets.pop()
-        embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*batch))))),
-                             self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
-        return embs, np.cumsum([0] + word_map)
-
     def embed(self, sentences: List[List[str]]):
         words_batch = [self.words_dict.get(w, WORD_UNKNOWN_ID) for s in sentences for w in s]
         word_embs = self.word_emb(self.set_device(Variable(torch.LongTensor(words_batch))))
