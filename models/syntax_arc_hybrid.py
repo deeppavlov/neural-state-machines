@@ -25,9 +25,10 @@ TAG_EMB_COUNT = 100
 HIDDEN_SIZE = 200
 
 WORD_DIM = 20
+CHAR_DIM = 20
 OUT_DIM = 3
 
-INPUT_DIM = WORD_DIM * (3 + 3)
+INPUT_DIM = (WORD_DIM + CHAR_DIM) * (3 + 3)
 
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
@@ -40,6 +41,12 @@ PUNISH = 10
 SyntaxState = namedtuple('SyntaxState', 'words embeddings arcs stack buffer')
 
 
+def char_emb_ids(word: str, embeddings_count, embedding_length=3):
+    w = ' ' + word + ' '
+    n = len(w)
+    return [hash(w[i:i + n + 1]) % embeddings_count for i in range(n - embedding_length + 1)]
+
+
 class TBSyntaxParser(nn.Module):
     def __init__(self, words_dict: Dict[int, str]):
         super().__init__()
@@ -49,6 +56,9 @@ class TBSyntaxParser(nn.Module):
 
         self.word_emb = nn.Embedding(self.words_count, WORD_DIM)
         self.word_emb.weight.data.normal_(0, np.sqrt(1 / INPUT_DIM))
+
+        self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
+        self.char_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
 
         self.input2hidden = nn.Linear(INPUT_DIM, HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, 3)
@@ -64,13 +74,33 @@ class TBSyntaxParser(nn.Module):
         super().cpu()
         self.set_device = lambda x: x.cpu()
 
+    def _batch_char_emb(self, batch: List[List[str]]):
+        word_map = [len(ws) for ws in batch]
+        batch = list(chain(*[[char_emb_ids(w, CHAR_EMB_COUNT) for w in ws] for ws in batch]))
+        offsets = [len(w) for w in batch]
+        offsets.insert(0, 0)
+        offsets.pop()
+        embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*batch))))),
+                             self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
+        return embs, np.cumsum([0] + word_map)
+
     def embed(self, sentences: List[List[str]]):
-        batch = [self.words_dict.get(w, WORD_UNKNOWN_ID) for s in sentences for w in s]
-        word_embs = self.word_emb(self.set_device(Variable(torch.LongTensor(batch))))
+        words_batch = [self.words_dict.get(w, WORD_UNKNOWN_ID) for s in sentences for w in s]
+        word_embs = self.word_emb(self.set_device(Variable(torch.LongTensor(words_batch))))
+
+        char_batch = [char_emb_ids(w, CHAR_EMB_COUNT) for s in sentences for w in s]
+        char_offsets = [len(w) for w in char_batch]
+        char_offsets.insert(0, 0)
+        char_offsets.pop()
+        char_embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*char_batch))))),
+                      self.set_device(Variable(torch.cumsum(torch.LongTensor(char_offsets), 0))))
+
+        embs = torch.cat([word_embs, char_embs], 1)
+
         index = 0
         res = []
         for s in sentences:
-            res.append(word_embs[index:index + len(s)])
+            res.append(embs[index:index + len(s)])
             index += len(s)
         return res
 
