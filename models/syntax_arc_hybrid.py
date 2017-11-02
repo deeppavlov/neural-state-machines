@@ -26,9 +26,10 @@ HIDDEN_SIZE = 200
 
 WORD_DIM = 20
 CHAR_DIM = 20
+TAG_DIM = 20
 OUT_DIM = 3
 
-INPUT_DIM = (WORD_DIM + CHAR_DIM) * (3 + 3)
+INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3)
 
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
@@ -38,7 +39,7 @@ BATCH_SIZE = 256
 
 PUNISH = 10
 
-SyntaxState = namedtuple('SyntaxState', 'words embeddings arcs stack buffer')
+SyntaxState = namedtuple('SyntaxState', 'words tags embeddings arcs stack buffer')
 
 
 def char_emb_ids(word: str, embeddings_count, embedding_length=3):
@@ -48,17 +49,24 @@ def char_emb_ids(word: str, embeddings_count, embedding_length=3):
 
 
 class TBSyntaxParser(nn.Module):
-    def __init__(self, words_dict: Dict[int, str]):
+    def __init__(self, words_dict: Dict[str, int], tags_dict: Dict[str, int]):
         super().__init__()
         self.words_dict = deepcopy(words_dict)
         self.words_reverse_dict = {v: k for k, v in self.words_dict.items()}
         self.words_count = len(self.words_dict)
+
+        self.tags_dict = deepcopy(tags_dict)
+        self.tags_reverse_dict = {v: k for k, v in self.tags_dict.items()}
+        self.tags_count = len(self.tags_dict)
 
         self.word_emb = nn.Embedding(self.words_count, WORD_DIM)
         self.word_emb.weight.data.normal_(0, np.sqrt(1 / INPUT_DIM))
 
         self.char_emb = nn.EmbeddingBag(CHAR_EMB_COUNT, CHAR_DIM, mode='sum')
         self.char_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
+
+        self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
+        self.tag_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
 
         self.input2hidden = nn.Linear(INPUT_DIM, HIDDEN_SIZE)
         self.hidden2output = nn.Linear(HIDDEN_SIZE, 3)
@@ -74,7 +82,7 @@ class TBSyntaxParser(nn.Module):
         super().cpu()
         self.set_device = lambda x: x.cpu()
 
-    def embed(self, sentences: List[List[str]]):
+    def embed(self, sentences: List[List[str]], tags: List[List[str]]):
         words_batch = [self.words_dict.get(w, WORD_UNKNOWN_ID) for s in sentences for w in s]
         word_embs = self.word_emb(self.set_device(Variable(torch.LongTensor(words_batch))))
 
@@ -85,7 +93,10 @@ class TBSyntaxParser(nn.Module):
         char_embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*char_batch))))),
                       self.set_device(Variable(torch.cumsum(torch.LongTensor(char_offsets), 0))))
 
-        embs = torch.cat([word_embs, char_embs], 1)
+        tags_batch = [self.tags_dict.get(t, WORD_UNKNOWN_ID) for ts in tags for t in ts]
+        tag_embs = self.tag_emb(self.set_device(Variable(torch.LongTensor(tags_batch))))
+
+        embs = torch.cat([word_embs, char_embs, tag_embs], 1)
 
         index = 0
         res = []
@@ -94,15 +105,16 @@ class TBSyntaxParser(nn.Module):
             index += len(s)
         return res
 
-    def create_initial_states(self, sentences: List[List[str]]):
+    def create_initial_states(self, sentences: List[List[str]], tags: List[List[str]]):
         states = []
         sentences = [[WORD_ROOT] + sent + [WORD_EMPTY] * 3 for sent in sentences]
-        embeddings = self.embed(sentences)
+        tags = [[WORD_ROOT] + tag + [WORD_EMPTY] * 3 for tag in tags]
+        embeddings = self.embed(sentences, tags)
 
-        for ws, embs in zip(sentences, embeddings):
+        for ws, ts, embs in zip(sentences, tags, embeddings):
             word_empty_index = len(ws) - 1
 
-            state = SyntaxState(ws, embs, {}, [word_empty_index, word_empty_index, 0],
+            state = SyntaxState(ws, ts, embs, {}, [word_empty_index, word_empty_index, 0],
                                 [b + 1 for b in range(len(ws) - 1)])
             states.append(state)
         return states
@@ -113,6 +125,7 @@ class TBSyntaxParser(nn.Module):
             if a == 0:  # shift
                 if len(s.buffer) > 3:
                     ns = SyntaxState(s.words,
+                                     s.tags,
                                      s.embeddings,
                                      s.arcs,
                                      s.stack + [s.buffer[0]],
@@ -135,6 +148,7 @@ class TBSyntaxParser(nn.Module):
                 new_arcs = dict(s.arcs)
                 new_arcs[s.stack[-1]] = head
                 ns = SyntaxState(s.words,
+                                 s.tags,
                                  s.embeddings,
                                  new_arcs,
                                  s.stack[:-1],
@@ -189,10 +203,10 @@ def get_errors(stack: List[int], buffer: List[int], heads: Dict[int, int], punis
 
 ##################################   TRAINING   ###################################
 
-train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ontonotes_pos_deprel.pickle',
-                                                                     lambda: prepare_data('onto', 'english'))
+train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ud_pos_deprel.pickle',
+                                                                     lambda: prepare_data('ud', 'english'))
 
-parser = TBSyntaxParser(dictionary)
+parser = TBSyntaxParser(dictionary, tags_dictionary)
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
@@ -222,8 +236,9 @@ for batch in batch_generator(train, BATCH_SIZE):
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
     tag_ids = [list(ws) for ws in tag_ids]
+    tags = [list(ws) for ws in tags]
 
-    states = parser.create_initial_states(sents)
+    states = parser.create_initial_states(sents, tags)
 
     correct_actions = 0
     total_actions = 0
@@ -299,8 +314,9 @@ for batch in batch_generator(train, BATCH_SIZE):
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
         tag_ids = [list(ws) for ws in tag_ids]
+        tags = [list(ws) for ws in tags]
 
-        states = parser.create_initial_states(sents)
+        states = parser.create_initial_states(sents,tags)
 
         correct_actions = 0
         total_actions = 0
