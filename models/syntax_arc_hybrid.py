@@ -29,6 +29,8 @@ CHAR_DIM = 20
 TAG_DIM = 20
 OUT_DIM = 3
 
+USE_DYNAMIC_ORACLE = True
+
 INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3)
 
 # TOP_FROM_STACK = 3
@@ -261,10 +263,18 @@ for batch in batch_generator(train, BATCH_SIZE):
         loss += local_loss * len(states)
         total_actions += len(states)
 
-        _, argmax = ((decisions - decisions.min(1, keepdim=True)[0] + 1) * legal_actions).max(1)
 
-        # states = parser.act(states, ys)
-        states = parser.act(states, argmax.data.tolist())
+
+        if USE_DYNAMIC_ORACLE:
+            _, parser_next_action = ((decisions - decisions.min(1, keepdim=True)[0] + 1) * legal_actions).max(1)
+
+        else:
+            # subtract [0.1 0 0] so we prefer other action than shift if possible
+            r = rights - Variable(parser.set_device(torch.FloatTensor([[0.1, 0, 0]])))
+
+            _, parser_next_action = r.max(1)
+
+        states = parser.act(states, parser_next_action.data.tolist())
 
         terminated = TBSyntaxParser.terminated(states)
 
