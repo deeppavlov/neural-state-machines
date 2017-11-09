@@ -29,7 +29,7 @@ CHAR_DIM = 20
 TAG_DIM = 20
 OUT_DIM = 3
 
-USE_DYNAMIC_ORACLE = True
+USE_DYNAMIC_ORACLE = False
 
 INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3)
 
@@ -172,14 +172,14 @@ class TBSyntaxParser(nn.Module):
         l1 = l0 * l2
         return Variable(torch.stack([l0, l1, l2], dim=1).float())
 
-    def forward(self, states: List[SyntaxState]):
+    def forward(self, states: List[SyntaxState], training=False):
         stack_indexes = self.set_device(torch.LongTensor([s.stack[-3:] for s in states]))
         buffer_indexes = self.set_device(torch.LongTensor([s.buffer[:3] for s in states]))
         indexes = torch.cat([stack_indexes, buffer_indexes], dim=1)
 
         X = torch.stack([s.embeddings[indexes[i]].view(-1) for i, s in enumerate(states)])
 
-        hid = F.relu(self.input2hidden(X))
+        hid = F.dropout(F.relu(self.input2hidden(X)), p=0.5, training=training)
         out = self.hidden2output(hid)
 
         res = out
@@ -251,7 +251,7 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     example = []
     while states:
-        decisions, legal_actions = parser.forward(states)
+        decisions, legal_actions = parser.forward(states, training=True)
         # decisions /= decisions + 1
 
         errors = [get_errors(s.stack[2:], s.buffer[:-3], h) for s, h in zip(states, heads)]
