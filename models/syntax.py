@@ -8,7 +8,6 @@ from time import time
 from typing import List, Iterator, Dict
 
 import numpy as np
-import sys
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -29,20 +28,23 @@ CHAR_DIM = 20
 LABEL_DIM = 12
 TAG_DIM = 20
 OUT_DIM = 3
-INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4)
+INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3)
+# INPUT_DIM = (WORD_DIM + CHAR_DIM + TAG_DIM) * (3 + 3 + 4)
 
 # TOP_FROM_STACK = 3
 # TOP_FROM_BUFFER = 3
 
 LR = 0.005
-BATCH_SIZE = 256
+BATCH_SIZE = 64
 L2_DECAY = 1e-6
 
+WORD_UNKNOWN = '_UKNOWN_'
 WORD_ROOT = ' '
 WORD_EMPTY = '\t'
-WORD_EMPTY_ID = 2
-WORD_ROOT_ID = 1
+
 WORD_UNKNOWN_ID = 0
+WORD_ROOT_ID = 1
+WORD_EMPTY_ID = 2
 
 BUCKETS_COUNT = 8
 
@@ -118,18 +120,18 @@ def prepare_data(provider='onto', lang='english'):
     conllu = providers[provider].DataProvider(lang=lang)
 
     dictionary = create_dictionary(chain(*([w.form for w in s] for s in conllu.train)),
-                                   reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
+                                   reserved_ids={WORD_UNKNOWN: WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
                                                  WORD_EMPTY: WORD_EMPTY_ID})
     print('Dictionary has {} elements'.format(len(dictionary)))
 
     tags_dictionary = create_dictionary(chain(*([w.postag for w in s] for s in conllu.train)),
-                                        reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
+                                        reserved_ids={WORD_UNKNOWN: WORD_UNKNOWN_ID, WORD_ROOT: WORD_ROOT_ID,
                                                       WORD_EMPTY: WORD_EMPTY_ID},
                                         min_count=1)
     print('Tags dictionary has {} elements'.format(len(tags_dictionary)))
 
     deprel_dictionary = create_dictionary(chain(*([w.deprel for w in s] for s in conllu.train)),
-                                          reserved_ids={'_UKNOWN_': WORD_UNKNOWN_ID},
+                                          reserved_ids={WORD_UNKNOWN: WORD_UNKNOWN_ID},
                                           min_count=1)
     print('Head labels dictionary has {} elements'.format(len(deprel_dictionary)))
 
@@ -212,16 +214,20 @@ def feat_children(target_node: int, heads: Dict[int, int], null_value=-1):
     return lpad(lc1, 2, null_value) + lpad(rc1, 2, null_value)
 
 
-SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs arc_labels stack buffer')
+# SyntaxState = namedtuple('SyntaxState', 'words buffer_index arcs arc_labels stack buffer')
+SyntaxState = namedtuple('SyntaxState', 'words tags embeddings arcs stack buffer arc_labels')
 
 
-class TBSyntaxParser(nn.Module):
-    def __init__(self, words_count, dependency_relations_count):
+class ArcStandardParser(nn.Module):
+    def __init__(self, words_dict: Dict[str, int], tags_dict: Dict[str, int], dependency_relations_count):
         super().__init__()
-        self.dependency_relations_count = dependency_relations_count
-        self.words_count = words_count
+        self.words_dict = words_dict
+        self.tags_dict = tags_dict
 
-        self.word_emb = nn.Embedding(words_count, WORD_DIM)
+        self.dependency_relations_count = dependency_relations_count
+        self.words_count = len(self.words_dict)
+
+        self.word_emb = nn.Embedding(self.words_count, WORD_DIM)
         self.word_emb.weight.data.normal_(0, np.sqrt(1/INPUT_DIM))
 
         self.tag_emb = nn.Embedding(TAG_EMB_COUNT, TAG_DIM)
@@ -254,24 +260,40 @@ class TBSyntaxParser(nn.Module):
                              self.set_device(Variable(torch.cumsum(torch.LongTensor(offsets), 0))))
         return embs, np.cumsum([0] + word_map)
 
-    def create_initial_states(self, sentences: List[List[str]], ids: List[List[int]], tag_ids: List[List[int]]):
+    def embed(self, sentences: List[List[str]], tags: List[List[str]]):
+        words_batch = [self.words_dict.get(w, WORD_UNKNOWN_ID) for s in sentences for w in s]
+        word_embs = self.word_emb(self.set_device(Variable(torch.LongTensor(words_batch))))
+
+        char_batch = [char_emb_ids(w, CHAR_EMB_COUNT) for s in sentences for w in s]
+        char_offsets = [len(w) for w in char_batch]
+        char_offsets.insert(0, 0)
+        char_offsets.pop()
+        char_embs = self.char_emb(self.set_device(Variable(torch.LongTensor(list(chain(*char_batch))))),
+                      self.set_device(Variable(torch.cumsum(torch.LongTensor(char_offsets), 0))))
+
+        tags_batch = [self.tags_dict.get(t, WORD_UNKNOWN_ID) for ts in tags for t in ts]
+        tag_embs = self.tag_emb(self.set_device(Variable(torch.LongTensor(tags_batch))))
+
+        embs = torch.cat([word_embs, char_embs, tag_embs], 1)
+
+        index = 0
+        res = []
+        for s in sentences:
+            res.append(embs[index:index + len(s)])
+            index += len(s)
+        return res
+
+    def create_initial_states(self, sentences: List[List[str]], tags: List[List[str]]):
         states = []
         sentences = [[WORD_ROOT] + sent + [WORD_EMPTY] * 3 for sent in sentences]
-        id_sents = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID] * 3 for sent in ids]
-        id_tags = [[WORD_ROOT_ID] + sent + [WORD_EMPTY_ID] * 3 for sent in tag_ids]
+        tags = [[WORD_ROOT] + tag + [WORD_EMPTY] * 3 for tag in tags]
+        embeddings = self.embed(sentences, tags)
 
-        char_embs, word_indexes = self._batch_char_emb(sentences)
-
-        for i, (ws, ids, tag_ids) in enumerate(zip(sentences, id_sents, id_tags)):
+        for ws, ts, embs in zip(sentences, tags, embeddings):
             word_empty_index = len(ws) - 1
 
-            words_embeddings = self.word_emb(self.set_device(Variable(torch.LongTensor(ids))))
-            chars_embeddings = char_embs[word_indexes[i]:word_indexes[i + 1]]
-            tags_embeddigns = self.tag_emb(self.set_device(Variable(torch.LongTensor(tag_ids))))
-            # buffer = torch.cat((words_embeddings, chars_embeddings), dim=1)
-            buffer = torch.cat([words_embeddings, chars_embeddings, tags_embeddigns], dim=1)
-
-            state = SyntaxState(ws[1:-3], 1, {}, {}, [word_empty_index, word_empty_index, 0], buffer)
+            state = SyntaxState(ws, ts, embs, {}, [word_empty_index, word_empty_index, 0],
+                                [b + 1 for b in range(len(ws) - 1)], {})
             states.append(state)
         return states
 
@@ -281,13 +303,16 @@ class TBSyntaxParser(nn.Module):
             action_id = 0 if a == 0 else (a - 1) // self.dependency_relations_count + 1
             dep_id = None if a == 0 else (a - 1) % self.dependency_relations_count
             if action_id == 0:  # shift
-                if s.buffer_index + 3 < len(s.buffer):
+                if len(s.buffer) > 3:
+                    # s.arcs,
+                    # s.arc_labels,
                     ns = SyntaxState(s.words,
-                                     s.buffer_index + 1,
+                                     s.tags,
+                                     s.embeddings,
                                      s.arcs,
-                                     s.arc_labels,
-                                     s.stack + [s.buffer_index],
-                                     s.buffer)
+                                     s.stack + [s.buffer[0]],
+                                     s.buffer[1:],
+                                     s.arc_labels)
                 else:
                     ns = s
             else:
@@ -316,50 +341,58 @@ class TBSyntaxParser(nn.Module):
                     new_arc_labels = dict(s.arc_labels)
                     new_arc_labels[child] = dep_id
 
+                    # new_arcs,
+                    # new_arc_labels,
                     ns = SyntaxState(s.words,
-                                     s.buffer_index,
+                                     s.tags,
+                                     s.embeddings,
                                      new_arcs,
-                                     new_arc_labels,
                                      s.stack[:-2] + [head],
-                                     s.buffer)
+                                     s.buffer,
+                                     new_arc_labels)
                 else:
                     ns = s
 
             new_states.append(ns)
         return new_states
 
-    @staticmethod
-    def terminated(states):
-        return [s.buffer_index + 3 == len(s.buffer) and len(s.stack) == 3 for s in states]
-
-    def forward(self, states: List[SyntaxState], test_mode=True):
+    def get_legal_actions(self, states: List[SyntaxState]):
         legal_actions = np.zeros([len(states), 1 + self.dependency_relations_count * 2]) + 1
-
-        stack_indexes = torch.LongTensor([s.stack[-3:] for s in states])
-        buffer_indexes = torch.stack([torch.arange(s.buffer_index, s.buffer_index + 3) for s in states]).long()
-        children_indexes = torch.LongTensor([feat_children(s.buffer_index, s.arcs, len(s.buffer) - 1) for s in states])
-        indexes = self.set_device(torch.cat([stack_indexes, buffer_indexes, children_indexes], dim=1))
-
-        X = []
         for i, s in enumerate(states):
-            X.append(s.buffer[indexes[i]].view(-1))
-
-            if s.buffer_index + 3 >= len(s.buffer):
+            if len(s.buffer) > 3:
                 legal_actions[i, 0] = 0
             if len(s.stack) <= 3:
                 legal_actions[i, 1:self.dependency_relations_count + 1] = 0
             if len(s.stack) <= 4:
                 legal_actions[i, self.dependency_relations_count + 1:] = 0
+        return self.set_device(Variable(torch.FloatTensor(legal_actions)))
 
-        X = torch.stack(X)
-        hid = F.relu(self.input2hidden(X))
+                # stack_len = self.set_device(torch.LongTensor([len(s.stack) for s in states]))
+        # buff_len = self.set_device(torch.LongTensor([len(s.buffer) for s in states]))
+        #
+        # l0 = buff_len > 3
+        # l2 = stack_len > 3
+        # l1 = l0 * l2
+        # return Variable(torch.stack([l0, l1, l2], dim=1).float())
+
+    @staticmethod
+    def terminated(states):
+        return [len(s.buffer) == 3 and len(s.stack) == 2 for s in states]
+
+    def forward(self, states: List[SyntaxState], training=False):
+        # children_indexes = torch.LongTensor([feat_children(s.buffer_index, s.arcs, len(s.buffer) - 1) for s in states])
+
+        stack_indexes = self.set_device(torch.LongTensor([s.stack[-3:] for s in states]))
+        buffer_indexes = self.set_device(torch.LongTensor([s.buffer[:3] for s in states]))
+        indexes = torch.cat([stack_indexes, buffer_indexes], dim=1)
+
+        X = torch.stack([s.embeddings[indexes[i]].view(-1) for i, s in enumerate(states)])
+
+        hid = F.dropout(F.relu(self.input2hidden(X)), p=0.5, training=training)
         out = self.hidden2output(hid)
 
         res = out
-        # res = torch.clamp(res, -10e5, 10)
-
-        # res = res.exp()
-        return res, self.set_device(Variable(torch.FloatTensor(legal_actions)))
+        return res, self.get_legal_actions(states)
 
 
 def chain_head(head: int, child: int, heads: Dict[int, int]):
@@ -448,14 +481,16 @@ doctest.testmod()
 
 ##################################   TRAINING   ###################################
 
-train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ontonotes_pos_deprel.pickle',
-                                                                     lambda: prepare_data('onto', 'english'))
+train, test, dictionary, tags_dictionary, deprel_dictionary = cached('downloads/ud_arcstandard.pickle',
+                                                                     lambda: prepare_data('ud', 'english'))
 
-parser = TBSyntaxParser(len(dictionary), len(deprel_dictionary))
+parser = ArcStandardParser(dictionary, tags_dictionary, len(deprel_dictionary))
 
 device_id = int(os.getenv('PYTORCH_GPU_ID', -1))
 if device_id >= 0:
     parser.cuda(device_id)
+
+print('Using cuda device "{}"'.format(device_id))
 
 optimizer = Adam(parser.parameters(), LR, betas=(0.9, 0.9), weight_decay=L2_DECAY)
 
@@ -480,9 +515,10 @@ for batch in batch_generator(train, BATCH_SIZE):
     deprels = [{i + 1: r for i, r in enumerate(rel)} for rel in deprels]
     sents = [list(ws) for ws in sents]
     ids = [list(ws) for ws in ids]
+    tags = [list(ws) for ws in tags]
     tag_ids = [list(ws) for ws in tag_ids]
 
-    states = parser.create_initial_states(sents, ids, tag_ids)
+    states = parser.create_initial_states(sents, tags)
 
     correct_actions = 0
     total_actions = 0
@@ -493,11 +529,11 @@ for batch in batch_generator(train, BATCH_SIZE):
 
     example = []
     while states:
-        decisions, legal_actions = parser.forward(states)
+        decisions, legal_actions = parser.forward(states, training=True)
         # decisions /= decisions + 1
 
         errors = [get_labels_errors(s.stack,
-                                    get_errors(s.stack[2:], list(range(s.buffer_index, len(s.buffer) - 3)), h),
+                                    get_errors(s.stack[2:], s.buffer[:-3], h),
                                     labels=r,
                                     labels_count=parser.dependency_relations_count
                                     ) for s, h, r in
@@ -525,7 +561,7 @@ for batch in batch_generator(train, BATCH_SIZE):
         # states = parser.act(states, ys)
         states = parser.act(states, argmax.data.tolist())
 
-        terminated = TBSyntaxParser.terminated(states)
+        terminated = ArcStandardParser.terminated(states)
 
         for i in reversed(range(len(states))):
             if terminated[i]:
@@ -595,7 +631,7 @@ for batch in batch_generator(train, BATCH_SIZE):
             _, argmax = decisions.max(1)
             states = parser.act(states, argmax.data.cpu().tolist())
 
-            terminated = TBSyntaxParser.terminated(states)
+            terminated = ArcStandardParser.terminated(states)
 
             for i in reversed(range(len(terminated))):
                 if terminated[i]:
