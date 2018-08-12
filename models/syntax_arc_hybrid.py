@@ -1,14 +1,9 @@
-import os
-import random
-import pickle
 from collections import namedtuple, defaultdict
 from copy import deepcopy
-from itertools import chain
 from time import time
-from typing import List, Iterator, Dict
+from typing import List, Dict
 
 import numpy as np
-import sys
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
@@ -320,16 +315,17 @@ for batch in batch_generator(train, BATCH_SIZE):
 
         ids, sents, tag_ids, tags, heads, deprels = zip(*[list(zip(*sent)) for sent in batch])
         heads = list(heads)
+        heads_map = [{i + 1: h for i, h in enumerate(head)} for head in heads]
         deprels = list(deprels)
         sents = [list(ws) for ws in sents]
         ids = [list(ws) for ws in ids]
         tag_ids = [list(ws) for ws in tag_ids]
         tags = [list(ws) for ws in tags]
 
-        states = parser.create_initial_states(sents,tags)
+        states = parser.create_initial_states(sents, tags)
 
-        correct_actions = 0
-        total_actions = 0
+        correct_actions = -len(heads)
+        total_actions = -len(heads)
 
         correct_heads = 0
         correct_rels = 0
@@ -346,6 +342,16 @@ for batch in batch_generator(train, BATCH_SIZE):
             _, argmax = decisions.max(1)
             states = parser.act(states, argmax.data.cpu().tolist())
 
+            # errors = [get_errors(s.stack[2:], s.buffer[:-3], h) for s, h in zip(states, heads_map)]
+            # errors = torch.FloatTensor(errors)
+            # rights = Variable(parser.set_device((errors - errors.min(1, keepdim=True)[0] == 0).float()))
+            # r = rights - Variable(parser.set_device(torch.FloatTensor([[0.1, 0, 0]])))
+            # _, parser_next_action = r.max(1)
+            # states = parser.act(states, parser_next_action.data.cpu().tolist())
+            #
+            # correct_actions += (r != 0).gather(1, argmax.view(-1, 1)).long().sum().data.cpu()[0]
+            # total_actions += len(r)
+
             terminated = TBSyntaxParser.terminated(states)
 
             for i in reversed(range(len(terminated))):
@@ -358,6 +364,7 @@ for batch in batch_generator(train, BATCH_SIZE):
                             #     correct_rels += 1
                     states.pop(i)
                     heads.pop(i)
+                    heads_map.pop(i)
                     deprels.pop(i)
 
         assert not states
@@ -367,7 +374,9 @@ for batch in batch_generator(train, BATCH_SIZE):
         token_per_sec = test_total_tokens_count / test_duration
         print('TEST', '{}'.format(len(test)).ljust(8),
               '{:.1f}%'.format(correct_heads / total_heads * 100),
-              '{:.1f}%'.format(correct_rels / total_heads * 100),
+              # '{:.1f}%'.format(correct_rels / total_heads * 100),
+              # '{:.1f}%'.format(correct_actions / total_actions * 100),
+              # '{:.1f}%'.format(correct_rels / total_heads * 100),
               '{:.1f} w/s'.format(token_per_sec),
               sep='\t')
 
